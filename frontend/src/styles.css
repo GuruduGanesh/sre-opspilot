@@ -1,0 +1,27 @@
+:root {
+  color: #e8edf5;
+  background: #0a1020;
+  font-family: Inter, ui-sans-serif, system-ui, sans-serif;
+}
+
+body { margin: 0; }
+main { max-width: 760px; margin: 8vh auto; padding: 2rem; }
+h1 { font-size: clamp(2rem, 6vw, 4rem); margin: 0.3rem 0 1rem; }
+p { color: #b6c2d5; line-height: 1.6; }
+.eyebrow { color: #74d6bd; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; }
+form, section { margin-top: 2rem; }
+label { display: block; color: #d6deeb; font-weight: 700; margin-bottom: 0.5rem; }
+.input-row { display: flex; gap: 0.75rem; }
+input { flex: 1; min-width: 0; border: 1px solid #34435f; border-radius: 0.5rem; background: #121d33; color: #e8edf5; font: inherit; padding: 0.75rem; }
+button { border: 0; border-radius: 0.5rem; background: #74d6bd; color: #07130f; cursor: pointer; font: inherit; font-weight: 800; padding: 0.75rem 1rem; }
+button:disabled { cursor: wait; opacity: 0.65; }
+.notice, .boundary { border-left: 3px solid #526682; padding-left: 0.75rem; }
+.incident-header { align-items: start; display: flex; gap: 1rem; justify-content: space-between; }
+h2 { font-size: 2rem; margin: 0; }
+code { color: #a9b9d1; font-size: 0.78rem; overflow-wrap: anywhere; text-align: right; }
+.timeline { border-left: 1px solid #34435f; list-style: none; margin: 1rem 0; padding: 0 0 0 1.5rem; }
+.timeline li { display: grid; gap: 0.25rem; margin: 0 0 1.25rem; position: relative; }
+.timeline li::before { background: #74d6bd; border-radius: 50%; content: ""; height: 0.6rem; left: -1.82rem; position: absolute; top: 0.25rem; width: 0.6rem; }
+time { color: #8e9cb2; font-size: 0.85rem; }
+.timeline strong { color: #d6deeb; text-transform: capitalize; }
+.timeline span { color: #b6c2d5; }

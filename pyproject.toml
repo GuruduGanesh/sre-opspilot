@@ -1,0 +1,38 @@
+[project]
+name = "opspilot"
+version = "0.1.0"
+description = "Evidence-first incident response for a controlled Kubernetes environment"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+  "fastapi>=0.128.0",
+  "httpx>=0.28.1",
+  "kubernetes>=36.0.3",
+  "openai>=2.45.0",
+  "pydantic>=2.12.0",
+  "pydantic-settings>=2.10.0",
+  "uvicorn[standard]>=0.40.0",
+]
+
+[dependency-groups]
+dev = [
+  "pytest>=9.0.0",
+  "pytest-cov>=7.0.0",
+  "ruff>=0.14.0",
+  "ty>=0.0.59",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["backend"]
+addopts = "-ra"
+markers = [
+  "e2e: requires the dedicated local kind cluster and the local API",
+]

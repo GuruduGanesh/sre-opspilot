@@ -1,0 +1,42 @@
+# Private planning and research material (never commit)
+internal/
+SUBMISSION_PLAN.md
+Notes.txt
+AGENTS.md
+docs/
+
+# Local configuration and credentials
+.env
+.env.*
+!.env.example
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+coverage.xml
+*.db
+*.sqlite
+
+# JavaScript / frontend
+node_modules/
+dist/
+build/
+coverage/
+.next/
+*.tsbuildinfo
+frontend/vite.config.js
+frontend/vite.config.d.ts
+
+# Tooling and operating-system files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+.claude/settings.local.json
+
+# Local scenario and evaluation output
+artifacts/
