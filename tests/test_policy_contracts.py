@@ -1,11 +1,19 @@
 from datetime import UTC, datetime
 from types import SimpleNamespace
 
+import httpx
 import pytest
 from opspilot.adapters.kubernetes import FakeKubernetesAdapter, KubernetesAdapter
 from opspilot.adapters.prometheus import PrometheusAdapter
-from opspilot.domain.actions import ActionPolicy, ActionProposal, ActionType
+from opspilot.dashboard import DashboardService
+from opspilot.domain.actions import ActionPlanStatus, ActionPolicy, ActionProposal, ActionType
+from opspilot.domain.evidence import EvidenceRecord, EvidenceSourceType
+from opspilot.domain.incidents import LifecycleState
+from opspilot.domain.tools import MetricQueryResult, WorkloadStatus
+from opspilot.llm_provider import create_responses_client
 from opspilot.model_selection import result_from_response
+from opspilot.recovery import RecoveryVerifier
+from opspilot.remediation import RemediationCoordinator
 from opspilot.settings import Settings
 
 
@@ -13,6 +21,81 @@ def test_prometheus_adapter_rejects_raw_or_unknown_query() -> None:
     adapter = PrometheusAdapter("http://prometheus.example")
     with pytest.raises(ValueError, match="unsupported metric query"):
         adapter.get_metric("up{job='anything'}", "checkout")
+
+
+def test_prometheus_adapter_rejects_non_allowlisted_service() -> None:
+    adapter = PrometheusAdapter("http://prometheus.example")
+    with pytest.raises(ValueError, match="not allowlisted"):
+        adapter.get_metric("service_5xx_rate", 'checkout"} or up{job="anything')
+
+
+def test_prometheus_adapter_formats_only_server_owned_promql_template() -> None:
+    seen_query = ""
+
+    def responder(request: httpx.Request) -> httpx.Response:
+        nonlocal seen_query
+        seen_query = request.url.params["query"]
+        return httpx.Response(
+            200,
+            json={"data": {"result": [{"value": [0, "0.02"]}]}},
+        )
+
+    adapter = PrometheusAdapter(
+        "http://prometheus.example", client=httpx.Client(transport=httpx.MockTransport(responder))
+    )
+
+    result = adapter.get_metric("service_5xx_recovery_rate", "checkout")
+
+    assert result.value == 0.02
+    assert seen_query == 'sum(rate(http_requests_total{service="checkout",status=~"5.."}[15s]))'
+
+
+def test_prometheus_adapter_returns_bounded_metric_series() -> None:
+    def responder(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/api/v1/query_range"
+        assert request.url.params["step"] == "15s"
+        return httpx.Response(
+            200,
+            json={"data": {"result": [{"values": [["1721000000", "0.1"], ["1721000015", "0.2"]]}]}},
+        )
+
+    adapter = PrometheusAdapter(
+        "http://prometheus.example", client=httpx.Client(transport=httpx.MockTransport(responder))
+    )
+
+    result = adapter.get_metric_series("service_5xx_rate", "checkout")
+
+    assert [value for _, value in result] == [0.1, 0.2]
+
+
+def test_dashboard_projection_does_not_invent_blast_radius_or_slo() -> None:
+    store = FakeActionStore()
+    store.incident_state = LifecycleState.TRIAGING
+    store.evidence = [
+        EvidenceRecord(
+            id="evidence-alert-1",
+            incident_id="incident-1",
+            source_type=EvidenceSourceType.ALERT,
+            source_ref="alert://checkout",
+            observed_at=datetime(2026, 7, 15, tzinfo=UTC),
+            summary="Checkout alert fired",
+            structured_payload={
+                "commonLabels": {
+                    "service": "checkout",
+                    "severity": "critical",
+                    "alertname": "Checkout5xxHigh",
+                }
+            },
+            content_hash="hash",
+        )
+    ]
+    snapshot = DashboardService(store, Settings(), kubernetes=FakeKubernetesAdapter()).snapshot(
+        "incident-1"
+    )
+
+    assert snapshot.blast_radius.status == "not_inferred"
+    assert snapshot.slo_status == "not_configured"
+    assert snapshot.service == "checkout"
 
 
 def test_fake_kubernetes_adapter_returns_typed_status() -> None:
@@ -46,6 +129,12 @@ def test_kubernetes_adapter_reads_deployment_and_restart_status() -> None:
     assert result.ready_replicas == 1
     assert result.desired_replicas == 2
     assert result.restart_count == 3
+
+
+def test_kubernetes_adapter_rejects_cross_namespace_reads() -> None:
+    adapter = KubernetesAdapter(apps_api=SimpleNamespace(), core_api=SimpleNamespace())
+    with pytest.raises(ValueError, match="restricted"):
+        adapter.get_workload_status("default", "checkout")
 
 
 def test_kubernetes_adapter_redacts_bounded_log_excerpt() -> None:
@@ -152,10 +241,265 @@ def test_model_fixture_metadata_requires_expected_tool_call_and_never_invents_co
             )
         ],
     )
-    settings = Settings(OPENAI_MODEL="gpt-5.6-terra")
+    settings = Settings(
+        LLM_PROVIDER="openai",
+        OPENAI_MODEL="gpt-5.6-terra",
+        MODEL_PRICE_INPUT_PER_MILLION="",
+        MODEL_PRICE_OUTPUT_PER_MILLION="",
+    )
 
     result = result_from_response(response, settings, latency_ms=123)
 
     assert result["pass"] is True
     assert result["estimated_cost_usd"] is None
     assert "not estimated" in str(result["cost_status"])
+
+
+def test_settings_treats_blank_optional_price_as_unconfigured() -> None:
+    settings = Settings(
+        OPENAI_MODEL="gpt-5.6-terra",
+        MODEL_PRICE_INPUT_PER_MILLION="",
+        MODEL_PRICE_OUTPUT_PER_MILLION="",
+    )
+
+    assert settings.model_price_input_per_million is None
+    assert settings.model_price_output_per_million is None
+
+
+def test_openrouter_provider_uses_its_key_base_url_and_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    class FakeClient:
+        pass
+
+    def fake_openai(**kwargs: object) -> FakeClient:
+        captured.update(kwargs)
+        return FakeClient()
+
+    monkeypatch.setattr("opspilot.llm_provider.OpenAI", fake_openai)
+    settings = Settings(
+        LLM_PROVIDER="openrouter",
+        OPENROUTER_API_KEY="test-openrouter-key",
+        OPENROUTER_MODEL="openai/gpt-5.6-luna",
+    )
+
+    client = create_responses_client(settings)
+
+    assert isinstance(client, FakeClient)
+    assert settings.active_model == "openai/gpt-5.6-luna"
+    assert captured == {
+        "api_key": "test-openrouter-key",
+        "base_url": "https://openrouter.ai/api/v1",
+    }
+
+
+def test_direct_openai_provider_uses_its_key_and_model(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, object] = {}
+
+    class FakeClient:
+        pass
+
+    def fake_openai(**kwargs: object) -> FakeClient:
+        captured.update(kwargs)
+        return FakeClient()
+
+    monkeypatch.setattr("opspilot.llm_provider.OpenAI", fake_openai)
+    settings = Settings(
+        LLM_PROVIDER="openai",
+        OPENAI_API_KEY="test-openai-key",
+        OPENAI_MODEL="gpt-5.6-terra",
+    )
+
+    client = create_responses_client(settings)
+
+    assert isinstance(client, FakeClient)
+    assert settings.active_model == "gpt-5.6-terra"
+    assert captured == {"api_key": "test-openai-key"}
+
+
+class FakeActionStore:
+    def __init__(self) -> None:
+        self.plans = {}
+        self.incident_state = LifecycleState.TRIAGING
+        self.evidence = [
+            EvidenceRecord(
+                id="evidence-1",
+                incident_id="incident-1",
+                source_type=EvidenceSourceType.ALERT,
+                source_ref="alert://checkout",
+                observed_at=datetime(2026, 7, 14, tzinfo=UTC),
+                summary="checkout errors observed",
+                content_hash="hash",
+            )
+        ]
+
+    def list_evidence(self, _incident_id: str):
+        return self.evidence
+
+    def incident(self, _incident_id: str):
+        return {"id": "incident-1", "lifecycle_state": self.incident_state.value}
+
+    def transition(self, _incident_id: str, target, actor: str, reason: str):
+        del actor, reason
+        self.incident_state = target
+        return self.incident("incident-1")
+
+    def create_action_plan(self, plan):
+        self.plans[plan.id] = plan
+
+    def action_plan(self, action_id: str):
+        return self.plans.get(action_id)
+
+    def update_action_plan(self, plan, expected_status=None):
+        if expected_status is not None and self.plans[plan.id].status is not expected_status:
+            raise ValueError("action plan changed concurrently; reload before continuing")
+        self.plans[plan.id] = plan
+
+
+class FakeRemediationAdapter:
+    def __init__(self) -> None:
+        self.version = "42"
+        self.executed = False
+
+    def resource_version(self, _namespace: str, _workload: str) -> str:
+        return self.version
+
+    def preview(self, proposal):
+        return {"dry_run": True, "resource_version": proposal.expected_resource_version}
+
+    def execute(self, _proposal):
+        self.executed = True
+        return {"executed": True}
+
+
+class FakeWorkloadReader:
+    def __init__(self, ready_replicas: int = 1, desired_replicas: int = 1) -> None:
+        self.ready_replicas = ready_replicas
+        self.desired_replicas = desired_replicas
+
+    def get_workload_status(self, namespace: str, workload: str) -> WorkloadStatus:
+        return WorkloadStatus(
+            namespace=namespace,
+            workload=workload,
+            ready_replicas=self.ready_replicas,
+            desired_replicas=self.desired_replicas,
+            restart_count=0,
+            observed_at=datetime.now(UTC),
+        )
+
+
+class FakeIndicatorReader:
+    def __init__(self, value: float) -> None:
+        self.value = value
+
+    def get_metric(self, query_name: str, service: str) -> MetricQueryResult:
+        return MetricQueryResult(
+            query_name=query_name,
+            value=self.value,
+            observed_at=datetime.now(UTC),
+            source_ref=f"fake:{service}:{query_name}",
+        )
+
+
+class UnavailableIndicatorReader:
+    def get_metric(self, _query_name: str, _service: str) -> MetricQueryResult:
+        raise RuntimeError("controlled indicator outage")
+
+
+def test_remediation_requires_evidence_approval_and_unchanged_target() -> None:
+    store = FakeActionStore()
+    adapter = FakeRemediationAdapter()
+    coordinator = RemediationCoordinator(store, adapter)
+    plan = coordinator.propose("incident-1", ActionType.ROLLBACK, ["evidence-1"])
+
+    with pytest.raises(ValueError, match="human approval"):
+        coordinator.execute(plan.id)
+    approved = coordinator.approve(plan.id, "oncall@example.test")
+    assert approved.approved_by == "oncall@example.test"
+
+    adapter.version = "43"
+    with pytest.raises(ValueError, match="target changed"):
+        coordinator.execute(plan.id)
+    assert adapter.executed is False
+
+
+def test_remediation_rejects_unknown_evidence() -> None:
+    with pytest.raises(ValueError, match="must cite evidence"):
+        RemediationCoordinator(FakeActionStore(), FakeRemediationAdapter()).propose(
+            "incident-1", ActionType.ROLLBACK, ["invented"]
+        )
+
+
+def test_remediation_rejects_tampered_preview_before_approval() -> None:
+    store = FakeActionStore()
+    coordinator = RemediationCoordinator(store, FakeRemediationAdapter())
+    plan = coordinator.propose("incident-1", ActionType.ROLLBACK, ["evidence-1"])
+    store.plans[plan.id] = plan.model_copy(update={"preview": {"dry_run": False}})
+
+    with pytest.raises(ValueError, match="preview changed"):
+        coordinator.approve(plan.id, "oncall@example.test")
+
+
+def test_remediation_executes_only_after_approval_and_verifies_recovery() -> None:
+    store = FakeActionStore()
+    adapter = FakeRemediationAdapter()
+    coordinator = RemediationCoordinator(store, adapter)
+    previewed = coordinator.propose("incident-1", ActionType.ROLLBACK, ["evidence-1"])
+    assert previewed.status is ActionPlanStatus.PREVIEWED
+    assert store.incident_state is LifecycleState.ACTION_PROPOSED
+    verification_plan = previewed.preview["verification_plan"]
+    assert verification_plan["independent"] is True
+    assert verification_plan["checks"][1] == {
+        "kind": "metric_threshold",
+        "query": "service_5xx_recovery_rate",
+        "window": "15 seconds",
+        "maximum": 0.01,
+    }
+
+    coordinator.approve(previewed.id, "oncall@example.test")
+    executed = coordinator.execute(previewed.id)
+    assert executed.status is ActionPlanStatus.EXECUTED
+    assert adapter.executed is True
+    assert store.incident_state is LifecycleState.MONITORING
+
+    completed, result = coordinator.verify(
+        previewed.id,
+        RecoveryVerifier(FakeWorkloadReader(), FakeIndicatorReader(value=0.001)),
+    )
+    assert result.recovered is True
+    assert completed.status is ActionPlanStatus.VERIFIED
+    assert store.incident_state is LifecycleState.RESOLVED
+
+
+def test_failed_recovery_reopens_triage_without_resolving_incident() -> None:
+    store = FakeActionStore()
+    coordinator = RemediationCoordinator(store, FakeRemediationAdapter())
+    plan = coordinator.propose("incident-1", ActionType.ROLLBACK, ["evidence-1"])
+    coordinator.approve(plan.id, "oncall@example.test")
+    coordinator.execute(plan.id)
+
+    completed, result = coordinator.verify(
+        plan.id,
+        RecoveryVerifier(FakeWorkloadReader(), FakeIndicatorReader(value=0.5)),
+    )
+    assert result.recovered is False
+    assert completed.status is ActionPlanStatus.FAILED
+    assert store.incident_state is LifecycleState.TRIAGING
+
+
+def test_verifier_outage_keeps_executed_action_retryable() -> None:
+    store = FakeActionStore()
+    coordinator = RemediationCoordinator(store, FakeRemediationAdapter())
+    plan = coordinator.propose("incident-1", ActionType.ROLLBACK, ["evidence-1"])
+    coordinator.approve(plan.id, "oncall@example.test")
+    coordinator.execute(plan.id)
+
+    with pytest.raises(RuntimeError, match="indicator outage"):
+        coordinator.verify(
+            plan.id,
+            RecoveryVerifier(FakeWorkloadReader(), UnavailableIndicatorReader()),
+        )
+    assert store.action_plan(plan.id).status is ActionPlanStatus.EXECUTED
+    assert store.incident_state is LifecycleState.MONITORING

@@ -1,13 +1,27 @@
+import json
 from datetime import UTC, datetime
 from enum import StrEnum
+from hashlib import sha256
 
 from pydantic import BaseModel, ConfigDict, Field
 
 
 class ActionType(StrEnum):
     ROLLBACK = "rollback"
+    RESTORE_MEMORY_MODE = "restore_memory_mode"
     RESTART = "restart"
     SCALE = "scale"
+
+
+class ActionPlanStatus(StrEnum):
+    PREVIEWED = "Previewed"
+    APPROVED = "Approved"
+    EXECUTING = "Executing"
+    EXECUTED = "Executed"
+    VERIFYING = "Verifying"
+    VERIFIED = "Verified"
+    FAILED = "Failed"
+    EXPIRED = "Expired"
 
 
 class ActionProposal(BaseModel):
@@ -23,6 +37,29 @@ class ActionProposal(BaseModel):
     expected_resource_version: str = Field(min_length=1)
     expires_at: datetime
     target_replicas: int | None = Field(default=None, ge=1, le=3)
+
+
+class ActionPlan(BaseModel):
+    """Server-owned action object whose fingerprint binds preview and approval."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    proposal: ActionProposal
+    preview: dict[str, object]
+    fingerprint: str
+    status: ActionPlanStatus
+    approved_at: datetime | None = None
+    approved_by: str | None = None
+    executed_at: datetime | None = None
+
+
+def action_fingerprint(proposal: ActionProposal, preview: dict[str, object]) -> str:
+    material = {
+        "proposal": proposal.model_dump(mode="json"),
+        "preview": preview,
+    }
+    return sha256(json.dumps(material, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
 class ActionPolicy:

@@ -12,12 +12,13 @@ _SECRET_PATTERN = re.compile(
 
 
 class KubernetesAdapter:
-    """Read-only Kubernetes adapter scoped by the caller's allowed namespace."""
+    """Read-only Kubernetes adapter restricted to the controlled demo namespace."""
 
     def __init__(
         self,
         apps_api: client.AppsV1Api | None = None,
         core_api: client.CoreV1Api | None = None,
+        allowed_namespace: str = "opspilot-demo",
     ) -> None:
         if apps_api is None or core_api is None:
             config.load_kube_config()
@@ -25,8 +26,10 @@ class KubernetesAdapter:
             core_api = core_api or client.CoreV1Api()
         self._apps_api = apps_api
         self._core_api = core_api
+        self._allowed_namespace = allowed_namespace
 
     def get_workload_status(self, namespace: str, workload: str) -> WorkloadStatus:
+        self._validate_namespace(namespace)
         deployment = self._apps_api.read_namespaced_deployment(workload, namespace)
         selector = _label_selector(deployment.spec.selector.match_labels or {})
         pods = self._core_api.list_namespaced_pod(namespace, label_selector=selector).items
@@ -41,6 +44,7 @@ class KubernetesAdapter:
         )
 
     def get_events(self, namespace: str, workload: str, limit: int = 20) -> list[KubernetesEvent]:
+        self._validate_namespace(namespace)
         if limit < 1 or limit > 100:
             raise ValueError("event limit must be between 1 and 100")
         events = self._core_api.list_namespaced_event(namespace).items
@@ -56,6 +60,7 @@ class KubernetesAdapter:
     def get_log_excerpt(
         self, namespace: str, pod: str, container: str, tail_lines: int = 100
     ) -> LogExcerpt:
+        self._validate_namespace(namespace)
         if tail_lines < 1 or tail_lines > 500:
             raise ValueError("log tail must be between 1 and 500 lines")
         raw = self._core_api.read_namespaced_pod_log(
@@ -78,6 +83,7 @@ class KubernetesAdapter:
     def get_deployment_history(
         self, namespace: str, deployment: str
     ) -> list[DeploymentRevision]:
+        self._validate_namespace(namespace)
         deployment_object = self._apps_api.read_namespaced_deployment(deployment, namespace)
         selector = _label_selector(deployment_object.spec.selector.match_labels or {})
         replica_sets = self._apps_api.list_namespaced_replica_set(
@@ -104,6 +110,10 @@ class KubernetesAdapter:
                 )
             )
         return sorted(revisions, key=lambda item: int(item.revision))
+
+    def _validate_namespace(self, namespace: str) -> None:
+        if namespace != self._allowed_namespace:
+            raise ValueError("Kubernetes access is restricted to the dedicated demo namespace")
 
     @staticmethod
     def _event_record(namespace: str, event: Any) -> KubernetesEvent:

@@ -31,6 +31,8 @@ spec:
           env:
             - name: FAIL_MODE
               value: "false"
+            - name: MEMORY_LEAK_MODE
+              value: "false"
           resources:
             requests:
               cpu: 50m

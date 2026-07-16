@@ -20,7 +20,7 @@ _ALLOWED_TRANSITIONS: dict[LifecycleState, set[LifecycleState]] = {
     LifecycleState.ENRICHED: {LifecycleState.TRIAGING},
     LifecycleState.TRIAGING: {LifecycleState.ACTION_PROPOSED},
     LifecycleState.ACTION_PROPOSED: {LifecycleState.TRIAGING, LifecycleState.EXECUTING},
-    LifecycleState.EXECUTING: {LifecycleState.MONITORING},
+    LifecycleState.EXECUTING: {LifecycleState.MONITORING, LifecycleState.TRIAGING},
     LifecycleState.MONITORING: {LifecycleState.TRIAGING, LifecycleState.RESOLVED},
     LifecycleState.RESOLVED: {LifecycleState.RCA},
     LifecycleState.RCA: {LifecycleState.RCA_PUBLISHED},

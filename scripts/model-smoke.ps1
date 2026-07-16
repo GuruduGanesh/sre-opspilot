@@ -5,8 +5,8 @@ param(
 $ErrorActionPreference = "Stop"
 $Root = Split-Path -Parent $PSScriptRoot
 
-if (-not $env:OPENAI_API_KEY) {
-    throw "OPENAI_API_KEY is not set. Create ignored .env from .env.example; do not put a key in source control."
+if (-not (Test-Path -LiteralPath (Join-Path $Root ".env"))) {
+    throw "Create ignored .env from .env.example and configure the selected provider key; do not put a key in source control."
 }
 
 if (-not $OutputPath) {
@@ -22,6 +22,9 @@ try {
     $env:PYTHONPATH = Join-Path $Root "backend"
     Push-Location $Root
     $result = uv run python -c "import json; from opspilot.model_selection import run_model_selection_fixture; from opspilot.settings import Settings; print(json.dumps(run_model_selection_fixture(Settings()), sort_keys=True))"
+    if ($LASTEXITCODE -ne 0) {
+        throw "Model smoke fixture failed. Check model access and OpenAI platform billing or quota; no artifact was created."
+    }
     $result | Set-Content -Encoding utf8 $OutputPath
     Get-Content -Raw $OutputPath
 }

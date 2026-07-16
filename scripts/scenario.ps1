@@ -1,8 +1,10 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)]
-    [ValidateSet("create", "deploy", "inject-p1", "reset-p1", "status", "destroy")]
-    [string]$Command
+    [ValidateSet("create", "deploy", "inject-p1", "reset-p1", "inject-p2", "reset-p2", "status", "destroy")]
+    [string]$Command,
+
+    [switch]$UsePrebuiltImage
 )
 
 $ErrorActionPreference = "Stop"
@@ -20,12 +22,25 @@ function Assert-Cluster {
     }
 }
 
+function Prepare-CheckoutImage {
+    if ($UsePrebuiltImage) {
+        docker image inspect opspilot-checkout:0.1 *> $null
+        if ($LASTEXITCODE -ne 0) {
+            throw "Prebuilt opspilot-checkout:0.1 image is missing. Load the judge image archive first."
+        }
+    }
+    else {
+        docker build --tag opspilot-checkout:0.1 "$Root\demo\checkout"
+        if ($LASTEXITCODE -ne 0) { throw "Checkout image build failed." }
+    }
+}
+
 switch ($Command) {
     "create" {
         if (-not (Test-Cluster)) {
             kind create cluster --name $Cluster --config "$Root\infra\kind\config.yaml"
         }
-        docker build --tag opspilot-checkout:0.1 "$Root\demo\checkout"
+        Prepare-CheckoutImage
         kind load docker-image opspilot-checkout:0.1 --name $Cluster
         kubectl apply -f "$Root\infra\k8s\namespace.yaml"
         kubectl apply -f "$Root\infra\k8s\checkout.yaml"
@@ -37,7 +52,7 @@ switch ($Command) {
     }
     "deploy" {
         Assert-Cluster
-        docker build --tag opspilot-checkout:0.1 "$Root\demo\checkout"
+        Prepare-CheckoutImage
         kind load docker-image opspilot-checkout:0.1 --name $Cluster
         kubectl apply -f "$Root\infra\k8s\namespace.yaml"
         kubectl apply -f "$Root\infra\k8s\checkout.yaml"
@@ -55,6 +70,18 @@ switch ($Command) {
         kubectl -n $Namespace set env deployment/checkout FAIL_MODE=false
         kubectl -n $Namespace rollout status deployment/checkout --timeout=120s
         Write-Host "P1 reset: checkout returns HTTP 200 responses under load."
+    }
+    "inject-p2" {
+        Assert-Cluster
+        kubectl -n $Namespace set env deployment/checkout MEMORY_LEAK_MODE=true FAIL_MODE=false
+        kubectl -n $Namespace rollout status deployment/checkout --timeout=120s
+        Write-Host "P2 injected: checkout retains controlled memory under load until Kubernetes restarts it."
+    }
+    "reset-p2" {
+        Assert-Cluster
+        kubectl -n $Namespace set env deployment/checkout MEMORY_LEAK_MODE=false
+        kubectl -n $Namespace rollout status deployment/checkout --timeout=120s
+        Write-Host "P2 reset: checkout no longer retains controlled memory."
     }
     "status" {
         Assert-Cluster

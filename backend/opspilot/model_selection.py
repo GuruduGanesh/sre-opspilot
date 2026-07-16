@@ -4,10 +4,10 @@ from datetime import UTC, datetime
 from time import perf_counter
 from typing import Any, cast
 
-from openai import OpenAI
 from openai.types.responses.function_tool_param import FunctionToolParam
 from openai.types.shared_params.reasoning import Reasoning
 
+from opspilot.llm_provider import create_responses_client
 from opspilot.settings import Settings
 
 FIXTURE_VERSION = "model-selection-v1"
@@ -28,14 +28,14 @@ INCIDENT_SNAPSHOT_TOOL: FunctionToolParam = {
 def run_model_selection_fixture(settings: Settings) -> dict[str, object]:
     """Run one narrow Responses API tool-call fixture; do not save model content."""
 
-    import os
-
-    if not os.environ.get("OPENAI_API_KEY"):
-        raise RuntimeError("OPENAI_API_KEY is required in an ignored local .env file")
+    if not settings.active_api_key:
+        raise RuntimeError(
+            f"{settings.llm_provider} API key is required in an ignored local .env file"
+        )
 
     started = perf_counter()
-    response = OpenAI().responses.create(
-        model=settings.openai_model,
+    response = create_responses_client(settings).responses.create(
+        model=settings.active_model,
         reasoning=cast(Reasoning, {"effort": settings.openai_reasoning_effort}),
         input=(
             "For this fixture, call get_incident_snapshot exactly once with incident_id "
@@ -71,7 +71,8 @@ def result_from_response(response: Any, settings: Settings, latency_ms: int) -> 
     )
     return {
         "fixture_version": FIXTURE_VERSION,
-        "model": settings.openai_model,
+        "provider": settings.llm_provider,
+        "model": settings.active_model,
         "reasoning_effort": settings.openai_reasoning_effort,
         "response_id": getattr(response, "id", None),
         "latency_ms": latency_ms,

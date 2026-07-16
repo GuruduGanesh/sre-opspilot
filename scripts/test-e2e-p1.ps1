@@ -28,7 +28,7 @@ try {
     .\scripts\scenario.ps1 inject-p1
     Start-Sleep -Seconds 3
 
-    $result = uv run python tests/e2e_p1_kind.py --run-id $RunId --db-path $DatabasePath
+    $result = uv run python -W ignore::DeprecationWarning tests/e2e_p1_kind.py --run-id $RunId --db-path $DatabasePath
     $result | Set-Content -Encoding utf8 $ResultPath
     Get-Content -Raw $ResultPath
 }
