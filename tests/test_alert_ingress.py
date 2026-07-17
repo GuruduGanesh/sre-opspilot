@@ -44,6 +44,13 @@ def post(client: TestClient, body: dict[str, object]):
     )
 
 
+def test_health_reports_the_selected_investigation_mode(client: TestClient) -> None:
+    assert client.get("/healthz").json() == {
+        "status": "ok",
+        "investigation_mode": "live_model",
+    }
+
+
 def test_firing_alert_creates_received_incident(client: TestClient) -> None:
     response = post(client, payload())
 
@@ -211,7 +218,7 @@ def test_action_plan_status_history_is_append_only(client: TestClient) -> None:
         id="action-history-test",
         proposal=ActionProposal(
             incident_id=incident_id,
-            action_type=ActionType.ROLLBACK,
+            action_type=ActionType.RESTORE_RESPONSE_MODE,
             namespace="opspilot-demo",
             workload="checkout",
             evidence_ids=[client.get(f"/api/v1/incidents/{incident_id}/evidence").json()[0]["id"]],
@@ -233,6 +240,44 @@ def test_action_plan_status_history_is_append_only(client: TestClient) -> None:
     assert [(event["event_type"], event["action_status"]) for event in events] == [
         ("preview_created", "Previewed"),
         ("status_changed", "Approved"),
+    ]
+
+
+def test_incident_action_endpoint_rehydrates_persisted_plan(client: TestClient) -> None:
+    incident_id = post(client, payload()).json()["incident_id"]
+    assert incident_id
+    evidence_id = client.get(f"/api/v1/incidents/{incident_id}/evidence").json()[0]["id"]
+    plan = ActionPlan(
+        id="action-rehydrate-test",
+        proposal=ActionProposal(
+            incident_id=incident_id,
+            action_type=ActionType.RESTORE_RESPONSE_MODE,
+            namespace="opspilot-demo",
+            workload="checkout",
+            evidence_ids=[evidence_id],
+            expected_resource_version="1",
+            expires_at=datetime.now(UTC) + timedelta(minutes=5),
+        ),
+        preview={"dry_run": True},
+        fingerprint="test-fingerprint",
+        status=ActionPlanStatus.VERIFIED,
+        recovery={"recovered": True, "reason": "independent checks passed"},
+    )
+    client.app.state.store.create_action_plan(plan)
+
+    response = client.get(f"/api/v1/incidents/{incident_id}/actions")
+
+    assert response.status_code == 200
+    assert response.json() == [
+        {
+            **plan.model_dump(mode="json"),
+            "approved_at": None,
+            "approved_by": None,
+            "executed_at": None,
+            "rejected_at": None,
+            "rejected_by": None,
+            "rejection_reason": None,
+        }
     ]
 
 

@@ -6,14 +6,20 @@ import pytest
 from opspilot.adapters.kubernetes import FakeKubernetesAdapter, KubernetesAdapter
 from opspilot.adapters.prometheus import PrometheusAdapter
 from opspilot.dashboard import DashboardService
-from opspilot.domain.actions import ActionPlanStatus, ActionPolicy, ActionProposal, ActionType
+from opspilot.domain.actions import (
+    ActionPlanStatus,
+    ActionPolicy,
+    ActionProposal,
+    ActionType,
+    action_fingerprint,
+)
 from opspilot.domain.evidence import EvidenceRecord, EvidenceSourceType
 from opspilot.domain.incidents import LifecycleState
 from opspilot.domain.tools import MetricQueryResult, WorkloadStatus
 from opspilot.llm_provider import create_responses_client
 from opspilot.model_selection import result_from_response
 from opspilot.recovery import RecoveryVerifier
-from opspilot.remediation import RemediationCoordinator
+from opspilot.remediation import KubernetesRemediationAdapter, RemediationCoordinator
 from opspilot.settings import Settings
 
 
@@ -47,7 +53,10 @@ def test_prometheus_adapter_formats_only_server_owned_promql_template() -> None:
     result = adapter.get_metric("service_5xx_recovery_rate", "checkout")
 
     assert result.value == 0.02
-    assert seen_query == 'sum(rate(http_requests_total{service="checkout",status=~"5.."}[15s]))'
+    assert seen_query == (
+        'sum(rate(http_requests_total{service="checkout",method="GET",'
+        'route="/checkout",status=~"5.."}[15s]))'
+    )
 
 
 def test_prometheus_adapter_returns_bounded_metric_series() -> None:
@@ -68,7 +77,7 @@ def test_prometheus_adapter_returns_bounded_metric_series() -> None:
     assert [value for _, value in result] == [0.1, 0.2]
 
 
-def test_dashboard_projection_does_not_invent_blast_radius_or_slo() -> None:
+def test_dashboard_projection_exposes_only_declared_controlled_traffic_scope() -> None:
     store = FakeActionStore()
     store.incident_state = LifecycleState.TRIAGING
     store.evidence = [
@@ -93,7 +102,11 @@ def test_dashboard_projection_does_not_invent_blast_radius_or_slo() -> None:
         "incident-1"
     )
 
-    assert snapshot.blast_radius.status == "not_inferred"
+    assert snapshot.blast_radius.status == "declared_controlled_topology"
+    assert snapshot.blast_radius.method == "GET"
+    assert snapshot.blast_radius.route == "/checkout"
+    assert snapshot.blast_radius.configured_callers == ["load-generator → GET /checkout"]
+    assert snapshot.blast_radius.downstream_dependencies == []
     assert snapshot.slo_status == "not_configured"
     assert snapshot.service == "checkout"
 
@@ -196,7 +209,7 @@ def test_kubernetes_adapter_returns_typed_event_and_deployment_history() -> None
 def proposal(**overrides: object) -> ActionProposal:
     values: dict[str, object] = {
         "incident_id": "incident-1",
-        "action_type": ActionType.ROLLBACK,
+        "action_type": ActionType.RESTORE_RESPONSE_MODE,
         "namespace": "opspilot-demo",
         "workload": "checkout",
         "evidence_ids": ["evidence-1"],
@@ -374,6 +387,40 @@ class FakeRemediationAdapter:
         return {"executed": True}
 
 
+class FakeAppsApi:
+    """Minimal Apps API fixture for concrete preview contract tests."""
+
+    def __init__(self, fail_mode: str) -> None:
+        self.deployment = SimpleNamespace(
+            metadata=SimpleNamespace(resource_version="42"),
+            spec=SimpleNamespace(
+                replicas=1,
+                template=SimpleNamespace(
+                    metadata=SimpleNamespace(annotations={}),
+                    spec=SimpleNamespace(
+                        containers=[
+                            SimpleNamespace(
+                                name="checkout",
+                                env=[SimpleNamespace(name="FAIL_MODE", value=fail_mode)],
+                            )
+                        ]
+                    ),
+                ),
+            ),
+        )
+        self.preview_patch = None
+
+    def read_namespaced_deployment(self, _workload: str, _namespace: str):
+        return self.deployment
+
+    def patch_namespaced_deployment(
+        self, _workload: str, _namespace: str, patch, dry_run: str | None = None
+    ):
+        assert dry_run == "All"
+        self.preview_patch = patch
+        return self.deployment
+
+
 class FakeWorkloadReader:
     def __init__(self, ready_replicas: int = 1, desired_replicas: int = 1) -> None:
         self.ready_replicas = ready_replicas
@@ -408,11 +455,40 @@ class UnavailableIndicatorReader:
         raise RuntimeError("controlled indicator outage")
 
 
+def test_kubernetes_preview_shows_exact_change_and_rejects_noop() -> None:
+    proposal = ActionProposal(
+        incident_id="incident-1",
+        action_type=ActionType.RESTORE_RESPONSE_MODE,
+        namespace="opspilot-demo",
+        workload="checkout",
+        evidence_ids=["evidence-1"],
+        expected_resource_version="42",
+        expires_at=datetime(2027, 1, 1, tzinfo=UTC),
+    )
+    changed_api = FakeAppsApi(fail_mode="true")
+    changed_preview = KubernetesRemediationAdapter(apps_api=changed_api).preview(proposal)
+
+    assert changed_preview["changes"] == [
+        {
+            "field": "FAIL_MODE",
+            "before": "true",
+            "after": "false",
+            "effect": "A rollout replaces the checkout pod.",
+        }
+    ]
+    assert changed_api.preview_patch is not None
+
+    noop_api = FakeAppsApi(fail_mode="false")
+    with pytest.raises(ValueError, match="would make no controlled change"):
+        KubernetesRemediationAdapter(apps_api=noop_api).preview(proposal)
+    assert noop_api.preview_patch is None
+
+
 def test_remediation_requires_evidence_approval_and_unchanged_target() -> None:
     store = FakeActionStore()
     adapter = FakeRemediationAdapter()
     coordinator = RemediationCoordinator(store, adapter)
-    plan = coordinator.propose("incident-1", ActionType.ROLLBACK, ["evidence-1"])
+    plan = coordinator.propose("incident-1", ActionType.RESTORE_RESPONSE_MODE, ["evidence-1"])
 
     with pytest.raises(ValueError, match="human approval"):
         coordinator.execute(plan.id)
@@ -428,25 +504,60 @@ def test_remediation_requires_evidence_approval_and_unchanged_target() -> None:
 def test_remediation_rejects_unknown_evidence() -> None:
     with pytest.raises(ValueError, match="must cite evidence"):
         RemediationCoordinator(FakeActionStore(), FakeRemediationAdapter()).propose(
-            "incident-1", ActionType.ROLLBACK, ["invented"]
+            "incident-1", ActionType.RESTORE_RESPONSE_MODE, ["invented"]
         )
 
 
 def test_remediation_rejects_tampered_preview_before_approval() -> None:
     store = FakeActionStore()
     coordinator = RemediationCoordinator(store, FakeRemediationAdapter())
-    plan = coordinator.propose("incident-1", ActionType.ROLLBACK, ["evidence-1"])
+    plan = coordinator.propose("incident-1", ActionType.RESTORE_RESPONSE_MODE, ["evidence-1"])
     store.plans[plan.id] = plan.model_copy(update={"preview": {"dry_run": False}})
 
     with pytest.raises(ValueError, match="preview changed"):
         coordinator.approve(plan.id, "oncall@example.test")
 
 
+def test_remediation_records_human_rejection_and_reopens_triage() -> None:
+    store = FakeActionStore()
+    coordinator = RemediationCoordinator(store, FakeRemediationAdapter())
+    plan = coordinator.propose("incident-1", ActionType.RESTORE_RESPONSE_MODE, ["evidence-1"])
+
+    rejected = coordinator.reject(plan.id, "oncall@example.test", "Need another signal")
+
+    assert rejected.status is ActionPlanStatus.REJECTED
+    assert rejected.rejected_by == "oncall@example.test"
+    assert rejected.rejection_reason == "Need another signal"
+    assert store.incident_state is LifecycleState.TRIAGING
+
+
+def test_expired_preview_is_audited_and_returns_incident_to_triage() -> None:
+    store = FakeActionStore()
+    coordinator = RemediationCoordinator(store, FakeRemediationAdapter())
+    plan = coordinator.propose("incident-1", ActionType.RESTORE_RESPONSE_MODE, ["evidence-1"])
+    expired_proposal = plan.proposal.model_copy(
+        update={"expires_at": datetime(2026, 7, 14, tzinfo=UTC)}
+    )
+    expired = plan.model_copy(
+        update={
+            "proposal": expired_proposal,
+            "fingerprint": action_fingerprint(expired_proposal, plan.preview),
+        }
+    )
+    store.plans[plan.id] = expired
+
+    with pytest.raises(ValueError, match="only a previewed"):
+        coordinator.approve(plan.id, "oncall@example.test")
+
+    assert store.action_plan(plan.id).status is ActionPlanStatus.EXPIRED
+    assert store.incident_state is LifecycleState.TRIAGING
+
+
 def test_remediation_executes_only_after_approval_and_verifies_recovery() -> None:
     store = FakeActionStore()
     adapter = FakeRemediationAdapter()
     coordinator = RemediationCoordinator(store, adapter)
-    previewed = coordinator.propose("incident-1", ActionType.ROLLBACK, ["evidence-1"])
+    previewed = coordinator.propose("incident-1", ActionType.RESTORE_RESPONSE_MODE, ["evidence-1"])
     assert previewed.status is ActionPlanStatus.PREVIEWED
     assert store.incident_state is LifecycleState.ACTION_PROPOSED
     verification_plan = previewed.preview["verification_plan"]
@@ -470,13 +581,14 @@ def test_remediation_executes_only_after_approval_and_verifies_recovery() -> Non
     )
     assert result.recovered is True
     assert completed.status is ActionPlanStatus.VERIFIED
+    assert completed.recovery == result.model_dump(mode="json")
     assert store.incident_state is LifecycleState.RESOLVED
 
 
 def test_failed_recovery_reopens_triage_without_resolving_incident() -> None:
     store = FakeActionStore()
     coordinator = RemediationCoordinator(store, FakeRemediationAdapter())
-    plan = coordinator.propose("incident-1", ActionType.ROLLBACK, ["evidence-1"])
+    plan = coordinator.propose("incident-1", ActionType.RESTORE_RESPONSE_MODE, ["evidence-1"])
     coordinator.approve(plan.id, "oncall@example.test")
     coordinator.execute(plan.id)
 
@@ -489,10 +601,43 @@ def test_failed_recovery_reopens_triage_without_resolving_incident() -> None:
     assert store.incident_state is LifecycleState.TRIAGING
 
 
+def test_memory_recovery_requires_a_stable_restart_count_over_time() -> None:
+    store = FakeActionStore()
+    coordinator = RemediationCoordinator(store, FakeRemediationAdapter())
+    plan = coordinator.propose("incident-1", ActionType.RESTORE_MEMORY_MODE, ["evidence-1"])
+    verification_plan = plan.preview["verification_plan"]
+    assert verification_plan["checks"][1] == {
+        "kind": "restart_stability",
+        "condition": "restart count must not increase for 30 seconds",
+        "window": "30 seconds",
+    }
+    coordinator.approve(plan.id, "oncall@example.test")
+    coordinator.execute(plan.id)
+    observed_at = datetime(2026, 7, 14, tzinfo=UTC)
+
+    pending, first = coordinator.verify(
+        plan.id,
+        RecoveryVerifier(FakeWorkloadReader()),
+        now=observed_at,
+    )
+    assert first.pending is True
+    assert pending.status is ActionPlanStatus.EXECUTED
+    assert store.incident_state is LifecycleState.MONITORING
+
+    completed, result = coordinator.verify(
+        plan.id,
+        RecoveryVerifier(FakeWorkloadReader()),
+        now=observed_at.replace(second=30),
+    )
+    assert result.recovered is True
+    assert completed.status is ActionPlanStatus.VERIFIED
+    assert store.incident_state is LifecycleState.RESOLVED
+
+
 def test_verifier_outage_keeps_executed_action_retryable() -> None:
     store = FakeActionStore()
     coordinator = RemediationCoordinator(store, FakeRemediationAdapter())
-    plan = coordinator.propose("incident-1", ActionType.ROLLBACK, ["evidence-1"])
+    plan = coordinator.propose("incident-1", ActionType.RESTORE_RESPONSE_MODE, ["evidence-1"])
     coordinator.approve(plan.id, "oncall@example.test")
     coordinator.execute(plan.id)
 

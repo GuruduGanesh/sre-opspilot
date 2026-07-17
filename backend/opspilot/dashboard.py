@@ -8,6 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from opspilot.adapters.kubernetes import KubernetesAdapter
 from opspilot.adapters.prometheus import PrometheusAdapter
 from opspilot.domain.evidence import EvidenceRecord, EvidenceSourceType
+from opspilot.domain.incidents import LifecycleState
 from opspilot.domain.tools import DeploymentRevision, KubernetesEvent, WorkloadStatus
 from opspilot.settings import Settings
 from opspilot.storage.incidents import SQLiteIncidentStore
@@ -24,9 +25,15 @@ class TelemetrySnapshot(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     service: str
+    method: str = "GET"
+    route: str = "/checkout"
+    rate_window: str = "1m"
+    recovery_window: str = "15s"
     error_rate: float | None = None
     request_rate: float | None = None
     recovery_error_rate: float | None = None
+    error_ratio: float | None = Field(default=None, ge=0, le=1)
+    recovery_state: str = "unknown"
     error_rate_trend: list[TelemetryPoint] = Field(default_factory=list)
     status: str
     message: str | None = None
@@ -38,7 +45,24 @@ class BlastRadiusSnapshot(BaseModel):
     status: str
     workload: str
     namespace: str
+    method: str
+    route: str
+    configured_callers: list[str] = Field(default_factory=list)
+    downstream_dependencies: list[str] = Field(default_factory=list)
     message: str
+
+
+class ServiceContextSnapshot(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    namespace: str
+    workload: str
+    image: str | None = None
+    revision: str | None = None
+    revision_observed_at: datetime | None = None
+    controlled_config: dict[str, str] = Field(default_factory=dict)
+    ready_replicas: int | None = None
+    desired_replicas: int | None = None
 
 
 class DashboardSnapshot(BaseModel):
@@ -54,9 +78,13 @@ class DashboardSnapshot(BaseModel):
     events: list[KubernetesEvent] = Field(default_factory=list)
     telemetry: TelemetrySnapshot
     blast_radius: BlastRadiusSnapshot
+    service_context: ServiceContextSnapshot
+    situation_summary: str
+    next_step: str
     slo_status: str
     slo_message: str
     collection_notes: list[str] = Field(default_factory=list)
+    investigation_mode: str = "live_model"
 
 
 class DashboardService:
@@ -102,13 +130,19 @@ class DashboardService:
                 deployment_history = kubernetes.get_deployment_history(
                     self._settings.demo_namespace, service
                 )
-                history = list(reversed(deployment_history))[:6]
+                history = sorted(
+                    deployment_history, key=lambda item: int(item.revision), reverse=True
+                )[:6]
                 workload_events = kubernetes.get_events(self._settings.demo_namespace, service)
-                events = list(reversed(workload_events))[:8]
+                events = sorted(
+                    workload_events, key=lambda item: item.observed_at, reverse=True
+                )[:8]
             except Exception as error:
                 notes.append(f"Kubernetes telemetry is unavailable: {type(error).__name__}")
 
         telemetry = self._telemetry(service, notes)
+        lifecycle_state = LifecycleState(incident["lifecycle_state"])
+        service_context = self._service_context(service, workload, history)
         return DashboardSnapshot(
             severity=severity,
             alert_name=alert_name,
@@ -120,20 +154,32 @@ class DashboardService:
             events=events,
             telemetry=telemetry,
             blast_radius=BlastRadiusSnapshot(
-                status="not_inferred",
+                status="declared_controlled_topology",
                 workload=service,
                 namespace=self._settings.demo_namespace,
+                method="GET",
+                route="/checkout",
+                configured_callers=["load-generator → GET /checkout"],
+                downstream_dependencies=[],
                 message=(
-                    "Dependency topology is not configured in this controlled demo. "
-                    "OpsPilot can confirm the affected workload only."
+                    "This is the declared traffic path for the controlled simulation. "
+                    "OpsPilot has not inferred external callers or downstream impact."
                 ),
             ),
+            service_context=service_context,
+            situation_summary=self._situation_summary(service, telemetry, incident_age_seconds),
+            next_step=self._next_step(lifecycle_state),
             slo_status="not_configured",
             slo_message=(
                 "No service-level objective is configured for this controlled demo. "
                 "The recovery gate is checkout 5xx rate at or below 0.01 over 15 seconds."
             ),
             collection_notes=notes,
+            investigation_mode=(
+                "controlled_simulation"
+                if self._settings.simulation_investigation_enabled
+                else "live_model"
+            ),
         )
 
     def _telemetry(self, service: str, notes: list[str]) -> TelemetrySnapshot:
@@ -156,6 +202,16 @@ class DashboardService:
                 error_rate=round(error_rate.value, 3),
                 request_rate=round(request_rate.value, 3),
                 recovery_error_rate=round(recovery_rate.value, 3),
+                error_ratio=(
+                    round(error_rate.value / request_rate.value, 4)
+                    if request_rate.value > 0
+                    else None
+                ),
+                recovery_state=(
+                    "passing"
+                    if recovery_rate.value <= self._settings.recovery_max_5xx_rate
+                    else "failing"
+                ),
                 error_rate_trend=[
                     TelemetryPoint(observed_at=observed_at, value=round(value, 3))
                     for observed_at, value in trend
@@ -186,3 +242,98 @@ class DashboardService:
             str(labels.get("severity", "unknown")),
             str(labels.get("alertname", alert.summary)),
         )
+
+    def _service_context(
+        self,
+        service: str,
+        workload: WorkloadStatus | None,
+        history: list[DeploymentRevision],
+    ) -> ServiceContextSnapshot:
+        latest = max(history, key=lambda item: int(item.revision)) if history else None
+        return ServiceContextSnapshot(
+            namespace=self._settings.demo_namespace,
+            workload=service,
+            image=latest.images[0] if latest and latest.images else None,
+            revision=latest.revision if latest else None,
+            revision_observed_at=latest.observed_at if latest else None,
+            controlled_config=latest.controlled_config if latest else {},
+            ready_replicas=workload.ready_replicas if workload else None,
+            desired_replicas=workload.desired_replicas if workload else None,
+        )
+
+    def _situation_summary(
+        self, service: str, telemetry: TelemetrySnapshot, incident_age_seconds: int
+    ) -> str:
+        if telemetry.status != "live":
+            return (
+                "Current route telemetry is unavailable; do not infer the incident scope "
+                "from stale data."
+            )
+        if telemetry.error_ratio is None:
+            return (
+                f"No requests were observed for {service} {telemetry.method} {telemetry.route} "
+                f"in the last {telemetry.rate_window}."
+            )
+        recovery_note = ""
+        if (
+            telemetry.recovery_state == "passing"
+            and telemetry.error_rate is not None
+            and telemetry.error_rate > self._settings.recovery_max_5xx_rate
+        ):
+            recovery_note = (
+                " The 15-second recovery gate is passing, while the 1-minute ratio still "
+                "includes earlier failures."
+            )
+        return (
+            f"Currently {telemetry.error_ratio:.1%} of observed {service} {telemetry.method} "
+            f"{telemetry.route} requests are HTTP 5xx over the last {telemetry.rate_window}. "
+            f"The incident record was received {self._human_age(incident_age_seconds)} ago."
+            f"{recovery_note}"
+        )
+
+    @staticmethod
+    def _human_age(seconds: int) -> str:
+        minutes, remaining = divmod(seconds, 60)
+        hours, minutes = divmod(minutes, 60)
+        if hours:
+            return f"{hours}h {minutes}m"
+        if minutes:
+            return f"{minutes}m {remaining}s"
+        return f"{remaining}s"
+
+    @staticmethod
+    def _next_step(lifecycle_state: LifecycleState) -> str:
+        steps = {
+            LifecycleState.RECEIVED: (
+                "Classify and enrich the alert before proposing any action."
+            ),
+            LifecycleState.CLASSIFIED: (
+                "Collect Kubernetes and Prometheus evidence for the affected route."
+            ),
+            LifecycleState.ENRICHED: "Review the collected evidence and begin triage.",
+            LifecycleState.TRIAGING: (
+                "Run a fresh investigation, then create a dry-run preview only for an "
+                "allowlisted restoration."
+            ),
+            LifecycleState.ACTION_PROPOSED: (
+                "Review the dry-run preview and explicitly approve or reject that exact plan."
+            ),
+            LifecycleState.EXECUTING: (
+                "Wait for the approved controlled action to complete; do not assume recovery."
+            ),
+            LifecycleState.MONITORING: (
+                "Independent recovery verification is checking readiness and the 15-second "
+                "5xx gate."
+            ),
+            LifecycleState.RESOLVED: (
+                "Recovery is verified. Draft the factual RCA from the persisted audit trail."
+            ),
+            LifecycleState.RCA: (
+                "Review the factual RCA draft, then publish it when the incident record is "
+                "complete."
+            ),
+            LifecycleState.RCA_PUBLISHED: (
+                "Incident workflow complete; retain the audit record for review."
+            ),
+        }
+        return steps[lifecycle_state]

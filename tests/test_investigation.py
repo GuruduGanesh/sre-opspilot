@@ -3,7 +3,12 @@ from datetime import UTC, datetime
 from types import SimpleNamespace
 
 import pytest
-from opspilot.dashboard import BlastRadiusSnapshot, DashboardSnapshot, TelemetrySnapshot
+from opspilot.dashboard import (
+    BlastRadiusSnapshot,
+    DashboardSnapshot,
+    ServiceContextSnapshot,
+    TelemetrySnapshot,
+)
 from opspilot.domain.evidence import EvidenceRecord, EvidenceSourceType
 from opspilot.evidence_collection import LiveEvidenceCollector
 from opspilot.investigation import InvestigationWorkflow
@@ -157,6 +162,20 @@ def test_investigation_allows_a_server_owned_timeline_tool() -> None:
     assert result.summary == "The alert is the recorded starting point."
 
 
+def test_controlled_simulation_is_explicit_and_never_calls_a_model() -> None:
+    store = FakeStore()
+    result = InvestigationWorkflow(
+        store,
+        Settings(OPS_PILOT_SIMULATION_INVESTIGATION_ENABLED=True),
+        collector=FakeCollector(),
+    ).investigate("incident-1", "What changed before the incident?")
+
+    assert result.mode == "controlled_simulation"
+    assert "not GPT-5.6" in result.summary
+    assert result.hypotheses[0].evidence_ids == ["evidence-alert-1"]
+    assert store.recorded[1] == "controlled-simulation"
+
+
 def test_live_telemetry_evidence_uses_exactly_three_decimal_places() -> None:
     snapshot = DashboardSnapshot(
         severity="critical",
@@ -172,11 +191,19 @@ def test_live_telemetry_evidence_uses_exactly_three_decimal_places() -> None:
             status="live",
         ),
         blast_radius=BlastRadiusSnapshot(
-            status="not_inferred",
+            status="declared_controlled_topology",
             workload="checkout",
             namespace="opspilot-demo",
+            method="GET",
+            route="/checkout",
             message="Controlled workload only.",
         ),
+        service_context=ServiceContextSnapshot(
+            namespace="opspilot-demo",
+            workload="checkout",
+        ),
+        situation_summary="Controlled telemetry is live.",
+        next_step="Inspect current evidence.",
         slo_status="not_configured",
         slo_message="No SLO configured.",
     )
@@ -186,6 +213,6 @@ def test_live_telemetry_evidence_uses_exactly_three_decimal_places() -> None:
     )
 
     assert records[0].summary == (
-        "Current checkout telemetry: 5xx 18.492/s, requests 18.492/s, "
-        "recovery 5xx 18.504/s"
+        "Current checkout GET /checkout telemetry: 5xx 18.492/s, requests "
+        "18.492/s over 1m, recovery 5xx 18.504/s over 15s"
     )

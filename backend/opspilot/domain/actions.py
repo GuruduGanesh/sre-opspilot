@@ -3,11 +3,11 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from hashlib import sha256
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class ActionType(StrEnum):
-    ROLLBACK = "rollback"
+    RESTORE_RESPONSE_MODE = "restore_response_mode"
     RESTORE_MEMORY_MODE = "restore_memory_mode"
     RESTART = "restart"
     SCALE = "scale"
@@ -20,6 +20,7 @@ class ActionPlanStatus(StrEnum):
     EXECUTED = "Executed"
     VERIFYING = "Verifying"
     VERIFIED = "Verified"
+    REJECTED = "Rejected"
     FAILED = "Failed"
     EXPIRED = "Expired"
 
@@ -36,7 +37,19 @@ class ActionProposal(BaseModel):
     evidence_ids: list[str] = Field(min_length=1)
     expected_resource_version: str = Field(min_length=1)
     expires_at: datetime
+    # The local demo does not authenticate an operator.  Keep this value visibly
+    # self-declared so the audit record does not imply an identity system exists.
+    requested_by: str = Field(default="local-oncall", min_length=3, max_length=128)
+    proposed_at: datetime | None = None
     target_replicas: int | None = Field(default=None, ge=1, le=3)
+    restart_at: datetime | None = None
+
+    @field_validator("action_type", mode="before")
+    @classmethod
+    def map_legacy_rollback_name(cls, value: object) -> object:
+        """Read pre-rename local plans without preserving a misleading action name."""
+
+        return "restore_response_mode" if value == "rollback" else value
 
 
 class ActionPlan(BaseModel):
@@ -52,6 +65,14 @@ class ActionPlan(BaseModel):
     approved_at: datetime | None = None
     approved_by: str | None = None
     executed_at: datetime | None = None
+    rejected_at: datetime | None = None
+    rejected_by: str | None = None
+    rejection_reason: str | None = None
+    stability_observed_at: datetime | None = None
+    stability_restart_count: int | None = Field(default=None, ge=0)
+    # Persist the independent verifier result with the plan so a page reload
+    # cannot turn a completed recovery decision into an unexplained status.
+    recovery: dict[str, object] | None = None
 
 
 def action_fingerprint(proposal: ActionProposal, preview: dict[str, object]) -> str:

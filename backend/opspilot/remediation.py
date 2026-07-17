@@ -50,10 +50,22 @@ class KubernetesRemediationAdapter:
 
     def preview(self, proposal: ActionProposal) -> dict[str, object]:
         self._validate_target(proposal.namespace, proposal.workload)
+        deployment = self._apps_api.read_namespaced_deployment(
+            proposal.workload, proposal.namespace
+        )
+        if deployment.metadata.resource_version != proposal.expected_resource_version:
+            raise ValueError("action proposal is stale because the target changed")
+        changes = self._planned_changes(deployment, proposal)
+        if all(change["before"] == change["after"] for change in changes):
+            raise ValueError(
+                "action preview would make no controlled change; continue triage or choose "
+                "a different allowlisted action"
+            )
+        patch = self._patch(proposal)
         response = self._apps_api.patch_namespaced_deployment(
             proposal.workload,
             proposal.namespace,
-            self._patch(proposal),
+            patch,
             dry_run="All",
         )
         return {
@@ -61,7 +73,8 @@ class KubernetesRemediationAdapter:
             "action_type": proposal.action_type.value,
             "target": f"{proposal.namespace}/deployments/{proposal.workload}",
             "resource_version": response.metadata.resource_version,
-            "patch": self._patch(proposal),
+            "patch": patch,
+            "changes": changes,
         }
 
     def execute(self, proposal: ActionProposal) -> dict[str, object]:
@@ -78,7 +91,7 @@ class KubernetesRemediationAdapter:
     @staticmethod
     def _patch(proposal: ActionProposal) -> dict[str, object]:
         metadata = {"resourceVersion": proposal.expected_resource_version}
-        if proposal.action_type is ActionType.ROLLBACK:
+        if proposal.action_type is ActionType.RESTORE_RESPONSE_MODE:
             return {
                 "metadata": metadata,
                 "spec": {
@@ -111,20 +124,80 @@ class KubernetesRemediationAdapter:
                 },
             }
         if proposal.action_type is ActionType.RESTART:
+            if proposal.restart_at is None:
+                raise ValueError("restart requires a server-generated restart timestamp")
             return {
                 "metadata": metadata,
                 "spec": {
                     "template": {
                         "metadata": {
                             "annotations": {
-                                "opspilot.dev/restarted-at": datetime.now(UTC).isoformat()
+                                "opspilot.dev/restarted-at": proposal.restart_at.isoformat()
                             }
                         }
                     }
                 },
             }
-        assert proposal.target_replicas is not None
+        if proposal.target_replicas is None:
+            raise ValueError("scale requires a bounded target replica count")
         return {"metadata": metadata, "spec": {"replicas": proposal.target_replicas}}
+
+    @staticmethod
+    def _planned_changes(
+        deployment: client.V1Deployment, proposal: ActionProposal
+    ) -> list[dict[str, str]]:
+        """Return a compact before/after summary from the deployment read used by preview."""
+
+        def env_value(name: str) -> str:
+            containers = deployment.spec.template.spec.containers
+            container = next(
+                (item for item in containers if item.name == proposal.workload), None
+            )
+            if container is None:
+                return "<container not found>"
+            for item in container.env or []:
+                if item.name == name:
+                    return item.value or "<valueFrom>"
+            return "<unset>"
+
+        if proposal.action_type is ActionType.RESTORE_RESPONSE_MODE:
+            return [
+                {
+                    "field": "FAIL_MODE",
+                    "before": env_value("FAIL_MODE"),
+                    "after": "false",
+                    "effect": "A rollout replaces the checkout pod.",
+                }
+            ]
+        if proposal.action_type is ActionType.RESTORE_MEMORY_MODE:
+            return [
+                {
+                    "field": "MEMORY_LEAK_MODE",
+                    "before": env_value("MEMORY_LEAK_MODE"),
+                    "after": "false",
+                    "effect": "A rollout replaces the checkout pod.",
+                }
+            ]
+        if proposal.action_type is ActionType.RESTART:
+            annotations = deployment.spec.template.metadata.annotations or {}
+            return [
+                {
+                    "field": "opspilot.dev/restarted-at",
+                    "before": annotations.get("opspilot.dev/restarted-at", "<unset>"),
+                    "after": proposal.restart_at.isoformat()
+                    if proposal.restart_at
+                    else "<unset>",
+                    "effect": "A rollout restarts the checkout pod.",
+                }
+            ]
+        return [
+            {
+                "field": "spec.replicas",
+                "before": str(deployment.spec.replicas),
+                "after": str(proposal.target_replicas),
+                "effect": "Kubernetes adjusts the checkout replica count.",
+            }
+        ]
 
     def _validate_target(self, namespace: str, workload: str) -> None:
         if namespace != self._allowed_namespace or workload not in self._allowed_workloads:
@@ -154,6 +227,7 @@ class RemediationCoordinator:
         action_type: ActionType,
         evidence_ids: list[str],
         target_replicas: int | None = None,
+        requested_by: str = "local-oncall",
     ) -> ActionPlan:
         incident = self._store.incident(incident_id)
         if incident is None:
@@ -163,6 +237,7 @@ class RemediationCoordinator:
         known_evidence = {item.id for item in self._store.list_evidence(incident_id)}
         if not evidence_ids or set(evidence_ids) - known_evidence:
             raise ValueError("action proposal must cite evidence from the current incident")
+        proposed_at = datetime.now(UTC)
         proposal = ActionProposal(
             incident_id=incident_id,
             action_type=action_type,
@@ -172,8 +247,11 @@ class RemediationCoordinator:
             expected_resource_version=self._adapter.resource_version(
                 self._namespace, self._workload
             ),
-            expires_at=datetime.now(UTC) + timedelta(minutes=5),
+            expires_at=proposed_at + timedelta(minutes=5),
+            requested_by=requested_by,
+            proposed_at=proposed_at,
             target_replicas=target_replicas,
+            restart_at=proposed_at if action_type is ActionType.RESTART else None,
         )
         self._policy.validate_for_preview(proposal)
         preview = self._adapter.preview(proposal)
@@ -197,6 +275,8 @@ class RemediationCoordinator:
     def approve(self, action_id: str, approved_by: str) -> ActionPlan:
         plan = self._require(action_id)
         self._validate_fingerprint(plan)
+        self._expire_if_stale(plan)
+        plan = self._require(action_id)
         if plan.status is not ActionPlanStatus.PREVIEWED:
             raise ValueError("only a previewed action plan can be approved")
         approved = plan.model_copy(
@@ -208,6 +288,32 @@ class RemediationCoordinator:
         )
         self._store.update_action_plan(approved, expected_status=ActionPlanStatus.PREVIEWED)
         return approved
+
+    def reject(self, action_id: str, rejected_by: str, reason: str | None = None) -> ActionPlan:
+        """Record an explicit human rejection and return the incident to triage."""
+
+        plan = self._require(action_id)
+        self._validate_fingerprint(plan)
+        self._expire_if_stale(plan)
+        plan = self._require(action_id)
+        if plan.status is not ActionPlanStatus.PREVIEWED:
+            raise ValueError("only a previewed action plan can be rejected")
+        rejected = plan.model_copy(
+            update={
+                "status": ActionPlanStatus.REJECTED,
+                "rejected_at": datetime.now(UTC),
+                "rejected_by": rejected_by,
+                "rejection_reason": reason,
+            }
+        )
+        self._store.update_action_plan(rejected, expected_status=ActionPlanStatus.PREVIEWED)
+        self._store.transition(
+            plan.proposal.incident_id,
+            LifecycleState.TRIAGING,
+            actor=rejected_by,
+            reason=f"rejected action plan {plan.id}" + (f": {reason}" if reason else ""),
+        )
+        return rejected
 
     def execute(self, action_id: str) -> ActionPlan:
         plan = self._require(action_id)
@@ -258,20 +364,40 @@ class RemediationCoordinator:
         return executed
 
     def verify(
-        self, action_id: str, verifier: RecoveryVerifier
+        self, action_id: str, verifier: RecoveryVerifier, now: datetime | None = None
     ) -> tuple[ActionPlan, RecoveryResult]:
         plan = self._require(action_id)
         if plan.status is not ActionPlanStatus.EXECUTED:
             raise ValueError("only an executed action plan can be verified")
         # A temporary verifier outage is not recovery evidence and must leave the
         # approved, executed plan retryable instead of trapping it in Verifying.
-        result = verifier.verify(plan)
+        result = verifier.verify(plan, now=now)
+        if result.pending:
+            pending = plan.model_copy(
+                update={
+                    "stability_observed_at": result.stability_observed_at,
+                    "stability_restart_count": result.stability_restart_count,
+                    "recovery": result.model_dump(mode="json"),
+                }
+            )
+            self._store.update_action_plan(pending, expected_status=ActionPlanStatus.EXECUTED)
+            return pending, result
         if result.recovered:
-            completed = plan.model_copy(update={"status": ActionPlanStatus.VERIFIED})
+            completed = plan.model_copy(
+                update={
+                    "status": ActionPlanStatus.VERIFIED,
+                    "recovery": result.model_dump(mode="json"),
+                }
+            )
             target = LifecycleState.RESOLVED
             reason = f"independent recovery verified for action plan {plan.id}: {result.reason}"
         else:
-            completed = plan.model_copy(update={"status": ActionPlanStatus.FAILED})
+            completed = plan.model_copy(
+                update={
+                    "status": ActionPlanStatus.FAILED,
+                    "recovery": result.model_dump(mode="json"),
+                }
+            )
             target = LifecycleState.TRIAGING
             reason = f"recovery verification failed for action plan {plan.id}: {result.reason}"
         self._store.update_action_plan(completed)
@@ -289,6 +415,37 @@ class RemediationCoordinator:
             raise KeyError(f"action plan not found: {action_id}")
         return plan
 
+    def list_for_incident(self, incident_id: str) -> list[ActionPlan]:
+        """Return plans after reconciling stale previews with their incident state."""
+
+        plans = self._store.list_action_plans(incident_id)
+        for plan in plans:
+            self._expire_if_stale(plan)
+        return self._store.list_action_plans(incident_id)
+
+    def _expire_if_stale(self, plan: ActionPlan, now: datetime | None = None) -> bool:
+        """Expire a preview once, then make the incident actionable again.
+
+        This lazy reconciliation keeps both the plan audit trail and the visible
+        lifecycle truthful without relying on a background worker in the local demo.
+        """
+
+        if plan.status is not ActionPlanStatus.PREVIEWED:
+            return False
+        if plan.proposal.expires_at > (now or datetime.now(UTC)):
+            return False
+        expired = plan.model_copy(update={"status": ActionPlanStatus.EXPIRED})
+        self._store.update_action_plan(expired, expected_status=ActionPlanStatus.PREVIEWED)
+        incident = self._store.incident(plan.proposal.incident_id)
+        if incident and incident["lifecycle_state"] == LifecycleState.ACTION_PROPOSED.value:
+            self._store.transition(
+                plan.proposal.incident_id,
+                LifecycleState.TRIAGING,
+                actor="opspilot-server",
+                reason=f"action plan {plan.id} expired; create a fresh preview",
+            )
+        return True
+
     @staticmethod
     def _validate_fingerprint(plan: ActionPlan) -> None:
         if action_fingerprint(plan.proposal, plan.preview) != plan.fingerprint:
@@ -304,13 +461,21 @@ class RemediationCoordinator:
                 "condition": "ready replicas must equal desired replicas",
             }
         ]
-        if proposal.action_type is ActionType.ROLLBACK:
+        if proposal.action_type is ActionType.RESTORE_RESPONSE_MODE:
             checks.append(
                 {
                     "kind": "metric_threshold",
                     "query": "service_5xx_recovery_rate",
                     "window": "15 seconds",
                     "maximum": self._recovery_max_5xx_rate,
+                }
+            )
+        if proposal.action_type in {ActionType.RESTORE_MEMORY_MODE, ActionType.RESTART}:
+            checks.append(
+                {
+                    "kind": "restart_stability",
+                    "condition": "restart count must not increase for 30 seconds",
+                    "window": "30 seconds",
                 }
             )
         return {"independent": True, "checks": checks}

@@ -1,7 +1,6 @@
 """Explicit local-only controls for the reproducible Kubernetes demo scenarios."""
 
 from datetime import UTC, datetime
-from uuid import uuid4
 
 from kubernetes import client, config
 from pydantic import BaseModel, ConfigDict
@@ -78,33 +77,43 @@ class DemoScenarioService:
             fail_mode=is_p1,
             memory_leak_mode=not is_p1,
         )
-        run_id = f"ui-{scenario}-{uuid4().hex[:12]}"
+        # One active incident per controlled scenario prevents repeat clicks from
+        # filling the on-call queue with indistinguishable demo records. A new
+        # record is created only after the prior scenario incident reaches a
+        # closed lifecycle state.
+        run_id = f"ui-{scenario}"
         result = self._store.ingest(self._payload(scenario, run_id))
         if result.incident_id is None:
             raise RuntimeError("controlled scenario did not create an incident")
         incident_id = result.incident_id
-        for target in (
-            LifecycleState.CLASSIFIED,
-            LifecycleState.ENRICHED,
-            LifecycleState.TRIAGING,
-        ):
-            self._store.transition(
-                incident_id,
-                target,
-                actor="opspilot-demo-controller",
-                reason=(
-                    f"controlled {scenario.upper()} simulation started; "
-                    "awaiting evidence and engineer review"
-                ),
-            )
+        if result.disposition == "incident_created":
+            for target in (
+                LifecycleState.CLASSIFIED,
+                LifecycleState.ENRICHED,
+                LifecycleState.TRIAGING,
+            ):
+                self._store.transition(
+                    incident_id,
+                    target,
+                    actor="opspilot-demo-controller",
+                    reason=(
+                        f"controlled {scenario.upper()} simulation started; "
+                        "awaiting evidence and engineer review"
+                    ),
+                )
         return DemoScenarioStart(
             incident_id=incident_id,
             scenario=scenario.upper(),
-            recommended_action="rollback" if is_p1 else "restore_memory_mode",
+            recommended_action="restore_response_mode" if is_p1 else "restore_memory_mode",
             message=(
                 "P1 is rolling out controlled checkout 500 responses under load."
                 if is_p1
                 else "P2 is rolling out the controlled checkout memory-leak mode under load."
+            )
+            if result.disposition == "incident_created"
+            else (
+                f"Existing active {scenario.upper()} controlled incident reopened; "
+                "complete verified recovery before starting a new run."
             ),
         )
 

@@ -46,6 +46,7 @@ switch ($Command) {
         kubectl apply -f "$Root\infra\k8s\checkout.yaml"
         kubectl apply -f "$Root\infra\k8s\prometheus.yaml"
         kubectl apply -f "$Root\infra\k8s\load-generator.yaml"
+        kubectl -n $Namespace rollout restart deployment/checkout
         kubectl -n $Namespace rollout status deployment/checkout --timeout=120s
         kubectl -n $Namespace rollout status deployment/prometheus --timeout=120s
         kubectl -n $Namespace rollout status deployment/load-generator --timeout=120s
@@ -58,6 +59,8 @@ switch ($Command) {
         kubectl apply -f "$Root\infra\k8s\checkout.yaml"
         kubectl apply -f "$Root\infra\k8s\prometheus.yaml"
         kubectl apply -f "$Root\infra\k8s\load-generator.yaml"
+        kubectl -n $Namespace rollout restart deployment/checkout
+        kubectl -n $Namespace rollout status deployment/checkout --timeout=120s
     }
     "inject-p1" {
         Assert-Cluster

@@ -16,6 +16,9 @@ class Settings(BaseSettings):
     prometheus_url: str | None = Field(default=None, alias="OPS_PILOT_PROMETHEUS_URL")
     recovery_max_5xx_rate: float = Field(default=0.01, alias="OPS_PILOT_RECOVERY_MAX_5XX_RATE")
     demo_controls_enabled: bool = Field(default=True, alias="OPS_PILOT_DEMO_CONTROLS_ENABLED")
+    simulation_investigation_enabled: bool = Field(
+        default=False, alias="OPS_PILOT_SIMULATION_INVESTIGATION_ENABLED"
+    )
     llm_provider: Literal["openai", "openrouter"] = Field(default="openai", alias="LLM_PROVIDER")
     openai_api_key: str | None = Field(default=None, alias="OPENAI_API_KEY")
     openai_model: str = Field(default="gpt-5.6-terra", alias="OPENAI_MODEL")

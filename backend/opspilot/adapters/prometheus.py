@@ -8,18 +8,26 @@ from opspilot.domain.tools import MetricQueryResult
 class PrometheusAdapter:
     """Prometheus adapter restricted to named server-owned query templates."""
 
-    ALLOWED_SERVICES = {"checkout"}
+    SERVICE_SELECTORS = {
+        "checkout": {"method": "GET", "route": "/checkout"},
+    }
     QUERY_TEMPLATES = {
         "service_5xx_rate": (
-            'sum(rate(http_requests_total{{service="{service}",status=~"5.."}}[1m]))'
+            'sum(rate(http_requests_total{{service="{service}",method="{method}",'
+            'route="{route}",status=~"5.."}}[1m]))'
         ),
         "service_5xx_recovery_rate": (
-            'sum(rate(http_requests_total{{service="{service}",status=~"5.."}}[15s]))'
+            'sum(rate(http_requests_total{{service="{service}",method="{method}",'
+            'route="{route}",status=~"5.."}}[15s]))'
         ),
         "service_5xx_chart_rate": (
-            'sum(rate(http_requests_total{{service="{service}",status=~"5.."}}[15s]))'
+            'sum(rate(http_requests_total{{service="{service}",method="{method}",'
+            'route="{route}",status=~"5.."}}[15s]))'
         ),
-        "service_request_rate": 'sum(rate(http_requests_total{{service="{service}"}}[1m]))',
+        "service_request_rate": (
+            'sum(rate(http_requests_total{{service="{service}",method="{method}",'
+            'route="{route}"}}[1m]))'
+        ),
     }
 
     def __init__(self, base_url: str, client: httpx.Client | None = None) -> None:
@@ -27,14 +35,15 @@ class PrometheusAdapter:
         self._client = client or httpx.Client(timeout=5.0)
 
     def get_metric(self, query_name: str, service: str) -> MetricQueryResult:
-        if service not in self.ALLOWED_SERVICES:
+        selector = self._selector_for(service)
+        if selector is None:
             raise ValueError(f"service is not allowlisted: {service}")
         try:
             template = self.QUERY_TEMPLATES[query_name]
         except KeyError as error:
             raise ValueError(f"unsupported metric query: {query_name}") from error
 
-        query = template.format(service=service)
+        query = template.format(service=service, **selector)
         response = self._client.get(f"{self._base_url}/api/v1/query", params={"query": query})
         response.raise_for_status()
         payload = response.json()
@@ -57,7 +66,8 @@ class PrometheusAdapter:
     ) -> list[tuple[datetime, float]]:
         """Read a bounded chart series from a named, server-owned query."""
 
-        if service not in self.ALLOWED_SERVICES:
+        selector = self._selector_for(service)
+        if selector is None:
             raise ValueError(f"service is not allowlisted: {service}")
         if not 5 <= step_seconds <= 60:
             raise ValueError("chart step must be between 5 and 60 seconds")
@@ -72,7 +82,7 @@ class PrometheusAdapter:
         response = self._client.get(
             f"{self._base_url}/api/v1/query_range",
             params={
-                "query": template.format(service=service),
+                "query": template.format(service=service, **selector),
                 "start": (now - window).isoformat(),
                 "end": now.isoformat(),
                 "step": f"{step_seconds}s",
@@ -86,3 +96,9 @@ class PrometheusAdapter:
             (datetime.fromtimestamp(float(timestamp), UTC), float(value))
             for timestamp, value in results[0].get("values", [])
         ]
+
+    @classmethod
+    def _selector_for(cls, service: str) -> dict[str, str] | None:
+        """Return a fixed route selector; never accept a caller-supplied PromQL label."""
+
+        return cls.SERVICE_SELECTORS.get(service)

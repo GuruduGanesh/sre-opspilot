@@ -1,3 +1,5 @@
+from typing import Literal
+
 from pydantic import BaseModel, ConfigDict, Field
 
 
@@ -19,3 +21,5 @@ class InvestigationReport(BaseModel):
     summary: str = Field(min_length=1, max_length=800)
     hypotheses: list[EvidenceBackedHypothesis] = Field(min_length=1, max_length=3)
     recommended_next_step: str = Field(min_length=1, max_length=400)
+    mode: Literal["live_model", "controlled_simulation"] = "live_model"
+    provenance: str = Field(default="live model response", min_length=1, max_length=160)

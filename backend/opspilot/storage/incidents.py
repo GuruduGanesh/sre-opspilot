@@ -318,7 +318,8 @@ class SQLiteIncidentStore:
                 (str(uuid4()), incident_id, current.value, target.value, actor, reason, now),
             )
         incident = self.incident(incident_id)
-        assert incident is not None
+        if incident is None:
+            raise KeyError(f"incident not found after transition: {incident_id}")
         return incident
 
     def timeline(self, incident_id: str) -> list[dict[str, str]]:

@@ -1,5 +1,7 @@
 [CmdletBinding()]
-param()
+param(
+    [switch]$SimulationInvestigation
+)
 
 $ErrorActionPreference = "Stop"
 $Root = Split-Path -Parent $PSScriptRoot
@@ -30,6 +32,9 @@ function Get-FailMode {
 Push-Location $Root
 $PrometheusProcess = $null
 try {
+    # A P1 recovery test requires the checkout baseline, not a leftover P2
+    # memory-pressure condition from an earlier rehearsal.
+    .\scripts\scenario.ps1 reset-p2
     if ((Get-FailMode) -ne "false") { .\scripts\scenario.ps1 reset-p1 }
     .\scripts\scenario.ps1 inject-p1
     $PrometheusProcess = Start-Process kubectl -ArgumentList @(
@@ -38,7 +43,9 @@ try {
     Start-Sleep -Seconds 3
 
     $env:PYTHONPATH = "backend;tests"
-    $result = uv run python -W ignore::DeprecationWarning tests/e2e_p1_remediation.py --run-id $RunId --db-path $DatabasePath --prometheus-url http://127.0.0.1:9090
+    $arguments = @("-W", "ignore::DeprecationWarning", "tests/e2e_p1_remediation.py", "--run-id", $RunId, "--db-path", $DatabasePath, "--prometheus-url", "http://127.0.0.1:9090")
+    if ($SimulationInvestigation) { $arguments += "--simulate-investigation" }
+    $result = uv run python @arguments
     Assert-LastExitCode "P1 remediation setup"
     $result | Set-Content -Encoding utf8 $ResultPath
     kubectl -n $Namespace rollout status deployment/checkout --timeout=120s
@@ -55,6 +62,8 @@ with TestClient(create_app(settings)) as http:
     response = http.post(f"/api/v1/actions/{os.environ['OPS_PILOT_E2E_ACTION']}/verify")
     print(response.status_code, response.text)
     response.raise_for_status()
+    if not response.json()["recovery"]["recovered"]:
+        raise RuntimeError("P1 recovery verifier did not confirm the controlled baseline")
 '@
     $env:OPS_PILOT_E2E_DB = $DatabasePath
     $env:OPS_PILOT_E2E_ACTION = $actionId
@@ -66,5 +75,6 @@ with TestClient(create_app(settings)) as http:
 finally {
     if ($PrometheusProcess -and -not $PrometheusProcess.HasExited) { Stop-Process -Id $PrometheusProcess.Id -Force }
     if ((Get-FailMode) -ne "false") { .\scripts\scenario.ps1 reset-p1 }
+    .\scripts\scenario.ps1 reset-p2
     Pop-Location
 }

@@ -59,12 +59,20 @@ class ActionPreviewRequest(BaseModel):
     action_type: ActionType
     evidence_ids: list[str] = Field(min_length=1, max_length=20)
     target_replicas: int | None = Field(default=None, ge=1, le=3)
+    requested_by: str = Field(default="local-oncall", min_length=3, max_length=128)
 
 
 class ActionApprovalRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     approved_by: str = Field(min_length=3, max_length=128)
+
+
+class ActionRejectionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    rejected_by: str = Field(min_length=3, max_length=128)
+    reason: str | None = Field(default=None, max_length=500)
 
 
 class VerificationResponse(BaseModel):
@@ -123,7 +131,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND, detail="action plan not found"
             )
-        return plan
+        remediation().list_for_incident(plan.proposal.incident_id)
+        return store.action_plan(action_id) or plan
 
     def postmortem_or_404(incident_id: str) -> PostmortemDraft:
         incident = store.incident(incident_id)
@@ -154,7 +163,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/healthz")
     def healthz() -> dict[str, str]:
-        return {"status": "ok"}
+        return {
+            "status": "ok",
+            "investigation_mode": (
+                "controlled_simulation"
+                if runtime_settings.simulation_investigation_enabled
+                else "live_model"
+            ),
+        }
 
     @app.post(
         "/api/v1/ingress/alertmanager",
@@ -218,6 +234,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/api/v1/incidents/{incident_id}/dashboard", response_model=DashboardSnapshot)
     def dashboard(incident_id: str) -> DashboardSnapshot:
         try:
+            remediation().list_for_incident(incident_id)
             return DashboardService(store, runtime_settings).snapshot(incident_id)
         except KeyError as error:
             raise HTTPException(
@@ -387,6 +404,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 request.action_type,
                 request.evidence_ids,
                 request.target_replicas,
+                request.requested_by,
             )
         except KeyError as error:
             raise HTTPException(
@@ -404,10 +422,29 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def get_action(action_id: str) -> ActionPlan:
         return action_or_404(action_id)
 
+    @app.get("/api/v1/incidents/{incident_id}/actions", response_model=list[ActionPlan])
+    def list_incident_actions(incident_id: str) -> list[ActionPlan]:
+        if store.incident(incident_id) is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="incident not found"
+            )
+        return remediation().list_for_incident(incident_id)
+
     @app.post("/api/v1/actions/{action_id}/approve", response_model=ActionPlan)
     def approve_action(action_id: str, request: ActionApprovalRequest) -> ActionPlan:
         try:
             return remediation().approve(action_id, request.approved_by)
+        except KeyError as error:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="action plan not found"
+            ) from error
+        except ValueError as error:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
+
+    @app.post("/api/v1/actions/{action_id}/reject", response_model=ActionPlan)
+    def reject_action(action_id: str, request: ActionRejectionRequest) -> ActionPlan:
+        try:
+            return remediation().reject(action_id, request.rejected_by, request.reason)
         except KeyError as error:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND, detail="action plan not found"
@@ -434,7 +471,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.post("/api/v1/actions/{action_id}/verify", response_model=VerificationResponse)
     def verify_action(action_id: str) -> VerificationResponse:
         plan = action_or_404(action_id)
-        if plan.proposal.action_type.value == "rollback" and not runtime_settings.prometheus_url:
+        if (
+            plan.proposal.action_type.value == "restore_response_mode"
+            and not runtime_settings.prometheus_url
+        ):
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail="set OPS_PILOT_PROMETHEUS_URL before recovery verification",

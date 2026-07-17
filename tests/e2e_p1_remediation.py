@@ -25,10 +25,12 @@ def main() -> int:
     parser.add_argument("--run-id", required=True)
     parser.add_argument("--db-path", type=Path, required=True)
     parser.add_argument("--prometheus-url", required=True)
+    parser.add_argument("--simulate-investigation", action="store_true")
     args = parser.parse_args()
     settings = Settings(
         OPS_PILOT_DB_PATH=args.db_path,
         OPS_PILOT_PROMETHEUS_URL=args.prometheus_url,
+        OPS_PILOT_SIMULATION_INVESTIGATION_ENABLED=args.simulate_investigation,
     )
     with TestClient(create_app(settings)) as http:
         created = http.post("/api/v1/ingress/alertmanager", json=scenario_payload(args.run_id))
@@ -41,10 +43,23 @@ def main() -> int:
         evidence = http.get(f"/api/v1/incidents/{incident_id}/evidence")
         evidence.raise_for_status()
         evidence_ids = [item["id"] for item in evidence.json()]
+        investigation_mode = None
+        if args.simulate_investigation:
+            investigation = http.post(
+                f"/api/v1/incidents/{incident_id}/investigate",
+                json={"question": "What evidence supports the controlled failure?"},
+            )
+            investigation.raise_for_status()
+            report = investigation.json()
+            if report["mode"] != "controlled_simulation":
+                raise AssertionError("simulation investigation was not explicitly labelled")
+            if "not GPT-5.6" not in report["summary"]:
+                raise AssertionError("simulation investigation did not state its model boundary")
+            investigation_mode = report["mode"]
 
         preview = http.post(
             f"/api/v1/incidents/{incident_id}/actions/preview",
-            json={"action_type": "rollback", "evidence_ids": evidence_ids},
+            json={"action_type": "restore_response_mode", "evidence_ids": evidence_ids},
         )
         preview.raise_for_status()
         plan = preview.json()
@@ -71,6 +86,7 @@ def main() -> int:
                     "incident_id": incident_id,
                     "action_id": plan["id"],
                     "lifecycle_after_execution": executed.json()["status"],
+                    "investigation_mode": investigation_mode,
                     "verified_at": datetime.now(UTC).isoformat(),
                 },
                 sort_keys=True,

@@ -46,10 +46,13 @@ class LiveEvidenceCollector:
                     f"prometheus:dashboard:{snapshot.service}",
                     collected_at,
                     (
-                        f"Current {snapshot.service} telemetry: "
+                        f"Current {snapshot.service} {snapshot.telemetry.method} "
+                        f"{snapshot.telemetry.route} telemetry: "
                         f"5xx {snapshot.telemetry.error_rate:.3f}/s, "
-                        f"requests {snapshot.telemetry.request_rate:.3f}/s, "
-                        f"recovery 5xx {snapshot.telemetry.recovery_error_rate:.3f}/s"
+                        f"requests {snapshot.telemetry.request_rate:.3f}/s "
+                        f"over {snapshot.telemetry.rate_window}, recovery 5xx "
+                        f"{snapshot.telemetry.recovery_error_rate:.3f}/s "
+                        f"over {snapshot.telemetry.recovery_window}"
                     ),
                     telemetry,
                 )

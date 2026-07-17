@@ -9,6 +9,7 @@ from opspilot.domain.tools import DeploymentRevision, KubernetesEvent, LogExcerp
 _SECRET_PATTERN = re.compile(
     r"(?i)\b(password|secret|token|api[_-]?key)\b\s*([=:])\s*[^\s,;]+"
 )
+_CONTROLLED_CONFIG_NAMES = {"FAIL_MODE", "MEMORY_LEAK_MODE"}
 
 
 class KubernetesAdapter:
@@ -99,12 +100,19 @@ class KubernetesAdapter:
             if revision is None:
                 continue
             containers = replica_set.spec.template.spec.containers or []
+            controlled_config = {
+                env.name: env.value
+                for container in containers
+                for env in (getattr(container, "env", None) or [])
+                if env.name in _CONTROLLED_CONFIG_NAMES and env.value is not None
+            }
             revisions.append(
                 DeploymentRevision(
                     namespace=namespace,
                     deployment=deployment,
                     revision=revision,
                     images=[container.image for container in containers],
+                    controlled_config=controlled_config,
                     observed_at=_as_utc(replica_set.metadata.creation_timestamp),
                     source_ref=f"k8s://{namespace}/replicasets/{replica_set.metadata.name}",
                 )

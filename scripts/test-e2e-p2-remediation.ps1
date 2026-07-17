@@ -24,6 +24,8 @@ function Get-CheckoutPods {
 
 Push-Location $Root
 try {
+    # Ensure P1's controlled 5xx mode cannot contaminate this clean P2 run.
+    .\scripts\scenario.ps1 reset-p1
     .\scripts\scenario.ps1 reset-p2
     .\scripts\scenario.ps1 inject-p2
     kubectl -n $Namespace exec deployment/load-generator -- sh -c 'for i in $(seq 1 12); do wget -T 5 -q -O /dev/null http://checkout:8000/checkout 2>/dev/null || true; sleep 1; done'
@@ -56,9 +58,18 @@ from opspilot.settings import Settings
 import os
 settings = Settings(OPS_PILOT_DB_PATH=os.environ["OPS_PILOT_E2E_DB"])
 with TestClient(create_app(settings)) as http:
+    first = http.post(f"/api/v1/actions/{os.environ['OPS_PILOT_E2E_ACTION']}/verify")
+    print(first.status_code, first.text)
+    first.raise_for_status()
+    if not first.json()["recovery"]["pending"]:
+        raise RuntimeError("P2 recovery verifier did not begin restart-stability observation")
+    import time
+    time.sleep(30)
     response = http.post(f"/api/v1/actions/{os.environ['OPS_PILOT_E2E_ACTION']}/verify")
     print(response.status_code, response.text)
     response.raise_for_status()
+    if not response.json()["recovery"]["recovered"]:
+        raise RuntimeError("P2 recovery verifier did not confirm a stable controlled baseline")
 '@
     $env:OPS_PILOT_E2E_DB = $DatabasePath
     $env:OPS_PILOT_E2E_ACTION = $actionId
@@ -68,6 +79,7 @@ with TestClient(create_app(settings)) as http:
     Get-Content -Raw $ResultPath
 }
 finally {
+    .\scripts\scenario.ps1 reset-p1
     .\scripts\scenario.ps1 reset-p2
     Pop-Location
 }

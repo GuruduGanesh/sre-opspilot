@@ -55,6 +55,7 @@ class DeploymentRevision(BaseModel):
     deployment: str
     revision: str
     images: list[str]
+    controlled_config: dict[str, str] = Field(default_factory=dict)
     observed_at: datetime
     source_ref: str
 

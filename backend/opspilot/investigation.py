@@ -83,7 +83,14 @@ class InvestigationWorkflow:
     ) -> None:
         self._store = store
         self._settings = settings
-        self._client = client or create_responses_client(settings)
+        self._simulation_enabled = settings.simulation_investigation_enabled
+        self._client = (
+            client
+            if client is not None
+            else None
+            if self._simulation_enabled
+            else create_responses_client(settings)
+        )
         self._collector = collector or LiveEvidenceCollector(store, settings)
 
     def investigate(self, incident_id: str, question: str) -> InvestigationReport:
@@ -93,6 +100,12 @@ class InvestigationWorkflow:
         if incident is None:
             raise KeyError(f"incident not found: {incident_id}")
         self._collector.collect(incident_id)
+        if self._simulation_enabled:
+            report = self._controlled_simulation_report(incident_id)
+            self._store.record_investigation(
+                incident_id, "controlled-simulation", report
+            )
+            return report
 
         input_items: list[Any] = [
             {
@@ -133,6 +146,8 @@ class InvestigationWorkflow:
         return report
 
     def _create_response(self, input_items: list[Any]) -> Any:
+        if self._client is None:
+            raise RuntimeError("live model client is unavailable in controlled simulation mode")
         return self._client.responses.create(
             model=self._settings.active_model,
             reasoning=cast(Reasoning, {"effort": self._settings.openai_reasoning_effort}),
@@ -149,7 +164,8 @@ class InvestigationWorkflow:
             raise ValueError("tool call attempted to access a different incident")
         if name == "get_incident_snapshot":
             incident = self._store.incident(incident_id)
-            assert incident is not None
+            if incident is None:
+                raise KeyError(f"incident not found: {incident_id}")
             return json.dumps(incident, sort_keys=True)
         if name == "get_incident_evidence":
             evidence = [
@@ -159,6 +175,53 @@ class InvestigationWorkflow:
         if name == "get_incident_timeline":
             return json.dumps(self._store.timeline(incident_id), sort_keys=True)
         raise ValueError(f"unsupported investigation tool: {name}")
+
+    def _controlled_simulation_report(self, incident_id: str) -> InvestigationReport:
+        """Produce a visibly non-model rehearsal report from persisted evidence only."""
+
+        evidence = self._store.list_evidence(incident_id)
+        if not evidence:
+            raise ValueError("controlled simulation requires persisted incident evidence")
+        alert = next((item for item in evidence if item.source_type.value == "alert"), evidence[0])
+        supporting_ids = [item.id for item in evidence[-3:]]
+        if alert.id not in supporting_ids:
+            supporting_ids.insert(0, alert.id)
+        supporting_ids = supporting_ids[:3]
+        p2 = "Memory" in alert.summary or "OOM" in alert.summary
+        root_cause = (
+            "Controlled memory-pressure mode is the rehearsal hypothesis; verify "
+            "the recorded restart/OOMKill evidence before restoring it."
+            if p2
+            else "Controlled checkout response mode is the rehearsal hypothesis; verify "
+            "the recorded 5xx telemetry and deployment configuration before restoring it."
+        )
+        next_step = (
+            "Review the persisted evidence, then create a dry-run only for the "
+            "allowlisted controlled memory restoration."
+            if p2
+            else "Review the persisted evidence, then create a dry-run only for the "
+            "allowlisted controlled response restoration."
+        )
+        return InvestigationReport(
+            summary=(
+                "Controlled simulation report derived deterministically from this incident's "
+                "persisted evidence. It is not GPT-5.6 output."
+            ),
+            hypotheses=[
+                {
+                    "root_cause": root_cause,
+                    "confidence": 0.5,
+                    "evidence_ids": supporting_ids,
+                    "contradictory_evidence_ids": [],
+                    "next_evidence_needed": (
+                        "Run the live GPT-5.6 investigation after API access is available."
+                    ),
+                }
+            ],
+            recommended_next_step=next_step,
+            mode="controlled_simulation",
+            provenance="deterministic local rehearsal report — not GPT-5.6",
+        )
 
     def _validate_evidence_references(
         self, incident_id: str, report: InvestigationReport

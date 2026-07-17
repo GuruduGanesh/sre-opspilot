@@ -8,7 +8,7 @@ app = FastAPI(title="OpsPilot checkout demo")
 requests = Counter(
     "http_requests_total",
     "HTTP requests served by the controlled checkout service",
-    ["service", "status"],
+    ["service", "method", "route", "status"],
 )
 _retained_memory: list[bytearray] = []
 
@@ -24,10 +24,10 @@ def checkout() -> JSONResponse:
         # Controlled P2 trigger: the 128 MiB pod limit turns repeated traffic into an OOMKill.
         _retained_memory.append(bytearray(16 * 1024 * 1024))
     if os.environ.get("FAIL_MODE", "false").lower() == "true":
-        requests.labels(service="checkout", status="500").inc()
+        requests.labels(service="checkout", method="GET", route="/checkout", status="500").inc()
         return JSONResponse(status_code=500, content={"error": "controlled checkout failure"})
 
-    requests.labels(service="checkout", status="200").inc()
+    requests.labels(service="checkout", method="GET", route="/checkout", status="200").inc()
     return JSONResponse(status_code=200, content={"status": "accepted"})
 
 
