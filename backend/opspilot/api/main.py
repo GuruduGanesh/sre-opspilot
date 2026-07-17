@@ -145,6 +145,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             store.list_evidence(incident_id),
             store.list_action_plans(incident_id),
             store.timeline(incident_id),
+            store.latest_investigation(incident_id),
         )
 
     def queue_item(incident: dict[str, str]) -> IncidentQueueItem:
@@ -230,6 +231,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND, detail="incident not found"
             ) from error
+
+    @app.get(
+        "/api/v1/incidents/{incident_id}/investigation",
+        response_model=InvestigationReport | None,
+    )
+    def get_latest_investigation(incident_id: str) -> InvestigationReport | None:
+        if store.incident(incident_id) is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="incident not found"
+            )
+        return store.latest_investigation(incident_id)
 
     @app.get("/api/v1/incidents/{incident_id}/dashboard", response_model=DashboardSnapshot)
     def dashboard(incident_id: str) -> DashboardSnapshot:

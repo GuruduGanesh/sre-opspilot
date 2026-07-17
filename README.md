@@ -44,10 +44,12 @@ The local demonstration includes:
   retained local incident, inject P1/P2, or open `?incident=<id>` as a reproducible
   deep link.
 
-The GPT-5.6 investigation route is contract-tested, but direct OpenAI validation
-is currently blocked by project quota. The controlled Kubernetes evidence and
-remediation flows are verified independently; do not treat the conversational
-investigation as demonstrated until a live provider run is recorded.
+The GPT-5.6 investigation route is contract-tested and has been exercised once
+against the direct OpenAI API in the controlled P1 scenario. That report cited
+persisted alert, Kubernetes, deployment, and Prometheus evidence, and its
+conclusion is retained with the incident record. This is evidence for that
+controlled P1 run only; it is not a claim that OpsPilot has been validated on
+production workloads or arbitrary incidents.
 
 ## How Codex and GPT-5.6 are used
 
@@ -57,10 +59,11 @@ the console. The project records those factual implementation sessions in its
 private development log rather than reconstructing them for submission.
 
 GPT-5.6 is the configured user-facing investigation runtime. Its bounded,
-read-only evidence/tool contract is implemented and tested, but a live GPT-5.6
-investigation has not yet been recorded because the direct OpenAI project lacks
-usable quota. The project will not claim live model reasoning in its demo or
-Devpost form until that validation is complete.
+read-only evidence/tool contract is implemented and tested. One direct
+GPT-5.6 Terra investigation has been recorded for the controlled P1 scenario;
+the report cites persisted evidence and is included in the audit-derived RCA.
+The product makes no broader accuracy, automation, or production-readiness
+claim from that single run.
 
 ## Why OpsPilot
 
@@ -106,9 +109,12 @@ flowchart LR
     I --> J[Structured postmortem]
 ```
 
-## Questions queued for live GPT-5.6 validation
+## Direct GPT-5.6 validation
 
-- What evidence supports the current root-cause hypothesis?
+- **Completed, controlled P1:** “What evidence supports the current root-cause
+  hypothesis?” The persisted report identified the controlled `FAIL_MODE=true`
+  setting on checkout revision 158, cited its available evidence, and explicitly
+  requested logs or a trace for direct execution-path confirmation.
 
 Broader service ranking and blast-radius answers remain architecture targets, not
 current submitted-build claims.
@@ -235,6 +241,97 @@ For the credential-free prebuilt-image reviewer path, see [JUDGE_PATH.md](JUDGE_
 For a complete controlled on-call walkthrough—from starting P1/P2 through
 evidence review, approved remediation, independent verification, and RCA—see
 [the on-call rehearsal guide](docs/USER_GUIDE.md).
+
+### Recorded controlled P1 walkthrough
+
+These screenshots were captured from controlled local runs. The Kubernetes
+workload, Prometheus telemetry, alert payload, approval history, and recovery
+result are all from the demo environment. Each screenshot is one decision point,
+not a long browser capture.
+
+1. Start from an explicit selection screen; the console does not show unrelated
+   telemetry until a reviewer injects or opens one incident record.
+
+   ![OpsPilot controlled incident command center selection screen](docs/assets/screenshots/01-command-center.png)
+
+   | Source / choice | Meaning |
+   | --- | --- |
+   | Controlled P1 | Starts the checkout `GET /checkout` 5xx scenario. |
+   | Controlled P2 | Starts the memory-pressure / restart-stability scenario. |
+   | Prometheus | Route rate, 5xx trend, and recovery threshold. |
+   | Kubernetes | Workload state, events, and deployment revisions. |
+   | Local incident store | Alert payload, evidence, approvals, and audit events. |
+   | GitHub | Explicitly **not connected** in this controlled demo. |
+
+2. Review a fresh active P1 record. The dashboard names the affected route, its
+   rate window, workload state, recovery gate, source boundaries, Kubernetes
+   events, deployment history, follow-up controls, and incident trail in one
+   wide console frame.
+
+   ![Controlled P1 checkout route telemetry and complete triage context](docs/assets/screenshots/02-p1-incident-overview-wide.png)
+
+   This captured P1 record is in **Triaging**. The cards always identify the
+   same route: `checkout GET /checkout`.
+
+   | Value | Meaning in this captured record |
+   | --- | --- |
+   | 5xx / second: `12.092/s` | Observed HTTP 5xx rate for the controlled route. |
+   | Request rate: `12.092/s` | All-status, one-minute rate for that route. |
+   | Error ratio: `100.0%` | Current one-minute 5xx ratio. |
+   | Workload health: `1/1` | Ready replicas / desired replicas. |
+   | Recovery gate: failing | 5xx must fall to `0.010/s` or below for 15 seconds. |
+   | Investigation: not run | The prompt is ready; no hypothesis is fabricated before a model report exists. |
+
+3. Review the server-side Kubernetes dry-run. The exact proposed setting change,
+   target, evidence binding, expiry, self-declared local approver, and rejection
+   path are visible before anything is applied.
+
+![Explicit human approval for an exact controlled action plan](docs/assets/screenshots/03-dry-run-approval.png)
+
+   | Approval detail | Meaning |
+   | --- | --- |
+   | Target | Exact controlled workload. |
+   | Planned change | `MEMORY_LEAK_MODE true → false` in this P2 example. |
+   | Evidence and expiry | Bound to this plan; it becomes stale rather than applying later. |
+   | Local identity | Self-declared demo identity, retained in the audit trail. |
+   | Reject plan | An audited route back to triage. |
+
+4. After explicit approval, the independent verifier confirms recovery. The RCA
+   is assembled from persisted facts and carries the bounded live-model
+   conclusion with its evidence identifiers.
+
+   ![Audit-derived RCA draft with the recorded bounded live-model conclusion](docs/assets/screenshots/04-recovery-rca.png)
+
+   The RCA is assembled from persisted incident facts. It records the evidence
+   count, actual source breakdown, evidence-cited investigation conclusion, and
+   explicit unknowns rather than inventing missing logs, traces, customer impact,
+   or external dependencies.
+
+   ---
+
+   **Recovery and scope**
+
+   ![Recovery, scope, and follow-up sections of the RCA](docs/assets/screenshots/05-recovery-rca-details.png)
+
+   The recovery outcome and the declared scope stay separate and readable.
+
+   ---
+
+   **Timeline**
+
+   ![Timeline and recorded verified action in the RCA](docs/assets/screenshots/06-recovery-rca-timeline.png)
+
+   The timeline orders persisted alert, evidence, approval, execution, and
+   verification events for this incident.
+
+   ---
+
+   **Recorded action**
+
+   ![Final verified action record in the RCA](docs/assets/screenshots/07-recovery-rca-recorded-action.png)
+
+   The final record distinguishes a proposed plan from an approved, applied, and
+   independently checked action.
 
 ## Development-only model provider
 

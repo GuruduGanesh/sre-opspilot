@@ -9,12 +9,12 @@
 
 ## Current status
 
-**Phase:** Controlled rehearsal workflow complete; live-provider validation blocked
+**Phase:** Controlled rehearsal workflow complete; direct GPT-5.6 P1 validation recorded
 
-**Next critical outcome:** Obtain usable GPT-5.6 provider access and record a
-live evidence-linked fixture. Direct OpenAI is required for final validation and
-recording once its project has usable quota; OpenRouter is optional for local
-development experiments only.
+**Next critical outcome:** Package and record the verified controlled workflow.
+One direct OpenAI GPT-5.6 Terra smoke test and one evidence-cited controlled P1
+investigation are recorded. Direct OpenAI remains the final-validation and
+recording path; OpenRouter is optional for local development experiments only.
 
 ## Delivery board
 
@@ -26,7 +26,7 @@ development experiments only.
 | Architecture and delivery plan | Complete | Safety model, tool boundary, milestones, and tests documented | `docs/ARCHITECTURE.md`, `docs/DELIVERY_PLAN.md` |
 | Local runtime check | Complete | Docker, Compose, kind, kubectl, Python, Node, and Git available | Verified July 14, 2026 |
 | OpenAI developer-docs connector | Pending restart | Connector available in the current Codex session | Installed globally; restart Codex before API implementation verification |
-| OpenAI API access / Build Week credits | Blocked | Configure server-side access without exposing a key | Local key now has Responses API permission, but the project returned `429 insufficient_quota`; Codex credits do not establish API quota |
+| OpenAI API access | Complete (direct P1 validation) | Configure server-side access without exposing a key | Direct OpenAI GPT-5.6 Terra smoke test and one controlled P1 investigation succeeded on July 17; credentials and dated artifacts remain ignored |
 | Backend scaffold | Complete | FastAPI app, dependency management, health endpoint, tests | `uv run pytest` (9 passing tests) |
 | Frontend scaffold | Complete | React/TypeScript app with a build and test command | `npm run build` passes locally |
 | kind simulation environment | Complete | Services, Prometheus, load generator, reset command | `opspilot-dev` kind cluster, verified July 14 |
@@ -35,11 +35,11 @@ development experiments only.
 | Scenario alert ingress | Complete (controlled verification) | Alertmanager v4-compatible payload validates, delivery-deduplicates, and creates `Received` incident | 6 ingress tests plus local API run; not an Alertmanager deployment |
 | Evidence collection adapters | Complete (controlled verification) | K8s, logs, metrics, deploy history with typed outputs | Unit contracts plus `scripts/test-e2e-p1.ps1` read live events, a log excerpt, deployment history, workload status, and persisted alert evidence |
 | Incident store and lifecycle | Complete (foundation) | SQLite-backed state transitions and audit events | Ingress evidence and valid server-owned transitions persist; no agent may set execution or resolution states |
-| GPT-5.6 model selection | Blocked on API quota | Saved fixture result with model, quality, latency, tokens, tool calls, priced estimate, and GPT-5.6-only fallback | `scripts/model-smoke.ps1` confirmed the permission change on Jul 15, then received `429 insufficient_quota`; no fixture artifact exists |
-| GPT-5.6 investigation workflow | Complete (provider contract and live-evidence verification); live answer blocked | Bounded function-tool investigation with structured hypotheses | Each request now snapshots and persists live Prometheus/Kubernetes/deployment context before the model gets the read-only evidence/timeline tools. Fake-client contracts pass; direct OpenAI is blocked by project quota and the OpenRouter GPT-5.6 test-provider has not yet made a live request. |
+| GPT-5.6 model selection | Complete (one direct smoke) | Saved fixture result with model, latency, tokens, tool calls, and priced estimate | `scripts/model-smoke.ps1` reached direct `gpt-5.6-terra` with medium reasoning: 3,534 ms, 77 input tokens, 39 output tokens, one tool call, and an estimated $0.000311; ignored artifact retained locally |
+| GPT-5.6 investigation workflow | Complete (one direct controlled P1) | Bounded function-tool investigation with structured hypotheses | The direct OpenAI P1 report persisted a 0.96-confidence, evidence-cited conclusion about controlled checkout `FAIL_MODE=true`. It also states the missing log/trace evidence needed for direct execution-path confirmation. This validates one controlled P1 run, not arbitrary incidents. |
 | Action policy and approval UX | Complete (controlled P1/P2 verification) | Allowlist, dry-run preflight, explicit approval, immutable audit, execution, and independent verification | Fresh July 16 P1/P2 runs passed. The preview exposes server-read before/after values, persisted evidence links, the self-declared local requester, server timestamp/expiry, fingerprint/resource-version binding, an audited rejection path, and independent recovery checks. No-op previews are refused. |
-| Incident console and chat | Complete (controlled rehearsal; live GPT blocked) | Command-center UI with actual controlled telemetry/context, follow-up input, approval, recovery, and RCA | The console can start fresh local P1/P2 incidents, auto-select from a persisted open-incident queue, support `?incident=<id>` deep links, display the 15-second 5xx trend, and move a recovered incident through audit-derived RCA draft and published states. Chrome verified P2 queue selection and its restoration action. Live GPT remains blocked by provider quota/key. |
-| Test suite and evaluation harness | Complete (controlled verification) | Unit, integration, end-to-end, safety tests, and saved evaluation results | `scripts/eval.ps1` v2 passed static checks, 27 unit/contract tests, frontend build, P1/P2 scenario checks, and both approved remediation flows; ignored `artifacts/eval-20260715-104325.json` |
+| Incident console and chat | Complete (controlled rehearsal; one direct P1 report) | Command-center UI with actual controlled telemetry/context, follow-up input, approval, recovery, and RCA | The console can start fresh local P1/P2 incidents, auto-select from a persisted open-incident queue, support `?incident=<id>` deep links, display the 15-second 5xx trend, and move a recovered incident through audit-derived RCA draft and published states. Persisted live-model reports rehydrate on direct links and the RCA includes the latest bounded conclusion. |
+| Test suite and evaluation harness | Complete (controlled verification) | Unit, integration, end-to-end, safety tests, and saved evaluation results | `scripts/eval.ps1` v2 passed static checks, 27 unit/contract tests, frontend build, P1/P2 scenario checks, and both approved remediation flows; final source checks now include 52 pytest tests plus Ruff, Ty, and the frontend production build |
 | Judge test path | Ready (local wrapper verification) | Prebuilt no-rebuild local path | The checkout image archive was rebuilt July 16; `run-judge.ps1` imported it, provisioned the dedicated cluster, and passed both P1/P2 safety flows locally. Run the same wrapper from a clean machine before submission. |
 | Devpost assets and compliance | Not started | Video, screenshots, final README, feedback ID, form review | — |
 
@@ -89,13 +89,15 @@ development experiments only.
 | 2026-07-17 | Performed a fresh controlled-simulation P1 verification and documented the clean local rehearsal sequence. | After clearing ignored local incident history, `scripts/test-e2e-p1-remediation.ps1 -SimulationInvestigation` passed: it injected P1, created an explicitly labelled deterministic report, performed the dry-run/approval/execution path, independently verified ready checkout with 0.0 5xx/s, and reset the scenario. API `/healthz` reported `ok` and `controlled_simulation`; the console returned HTTP 200 with an empty open-incident queue after cleanup. |
 | 2026-07-17 | Final local console and safety-flow audit. | Ruff, Ty, 50 pytest tests, production frontend build, and `git diff --check` passed. The console rendered a live P1 as `checkout GET /checkout` with 18.510 5xx/s, declared scope, evidence, and a Triaging approval gate. The P2 wrapper independently verified readiness plus 30-second restart stability after approved remediation. Inject now opens the new incident immediately while telemetry warms in the background. |
 | 2026-07-17 | Cleared stale deep-link behavior after local incident-history cleanup. | Ruff, Ty, 50 pytest tests, the production frontend build, and `git diff --check` passed. A missing `?incident=` record now clears the URL and returns the console to explicit scenario selection instead of repeatedly polling a deleted record. |
+| 2026-07-17 | Completed the minimum direct OpenAI validation and final controlled P1 walkthrough. | `scripts/model-smoke.ps1` reached direct `gpt-5.6-terra` once; one direct P1 report persisted an evidence-cited controlled `FAIL_MODE=true` conclusion at 0.96 confidence. The browser then completed dry-run review, explicit local approval, independent recovery verification, and RCA review. Ruff, Ty, 52 pytest tests, and the production frontend build passed. |
+| 2026-07-17 | Reworked the neutral console into a source-bounded command center and improved the public README screenshot sequence. | Ruff, Ty, 52 pytest tests, production frontend build, and `git diff --check` passed. The README separates command center, route-aware P1 overview, approval, and RCA screens, with short value definitions; it replaces the repeated full-page incident capture. |
 
 ## Immediate backlog
 
-1. Add an ignored `OPENROUTER_API_KEY`, set `LLM_PROVIDER=openrouter`, then run the GPT-5.6 model-selection and live investigation fixture with a dated local pricing snapshot. This is the only blocker to actual conversational model answers.
-2. Restore `LLM_PROVIDER=openai` and use the direct OpenAI project only for the final validation and recording after it has usable quota.
-3. Extend the controlled evaluation output with model diagnosis results only after live GPT-5.6 runs exist.
-4. Run the prebuilt reviewer wrapper on a clean machine, then attach the image archive to the review release and capture final submission assets.
+1. Run the prebuilt reviewer wrapper on a clean machine, then attach the image archive to the review release.
+2. Record the under-three-minute video from a clean controlled P1 run and capture the final Devpost image set. Do not spend a new model call unless the recording requires a fresh direct-model response.
+3. Reconcile every Devpost sentence against `CLAIM_VERIFICATION.md`, then complete the form, `/feedback` session ID, licensing, and repository-access checks.
+4. Run the final evaluation and P1/P2 remediation checks against the submitted commit.
 
 ## Development routine
 

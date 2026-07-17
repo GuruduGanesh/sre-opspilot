@@ -5,6 +5,7 @@ from fastapi.testclient import TestClient
 from opspilot.domain.actions import ActionPlan, ActionPlanStatus, ActionProposal, ActionType
 from opspilot.domain.evidence import EvidenceRecord, EvidenceSourceType
 from opspilot.domain.incidents import LifecycleState
+from opspilot.domain.investigation import InvestigationReport
 
 
 def payload(run_id: str = "run-001", status: str = "firing") -> dict[str, object]:
@@ -132,6 +133,33 @@ def test_live_collection_deduplicates_an_unchanged_source_payload(client: TestCl
     assert store.append_evidence_if_new(duplicate) is False
 
 
+def test_latest_persisted_investigation_is_available_after_reopening_an_incident(
+    client: TestClient,
+) -> None:
+    incident_id = post(client, payload()).json()["incident_id"]
+    assert incident_id
+    report = InvestigationReport.model_validate(
+        {
+            "summary": "Persisted evidence supports the controlled checkout failure mode.",
+            "hypotheses": [
+                {
+                    "root_cause": "FAIL_MODE is enabled for the controlled checkout workload.",
+                    "confidence": 0.9,
+                    "evidence_ids": ["persisted-alert"],
+                    "contradictory_evidence_ids": [],
+                }
+            ],
+            "recommended_next_step": "Review the controlled response restoration preview.",
+        }
+    )
+    client.app.state.store.record_investigation(incident_id, "gpt-5.6-terra", report)
+
+    response = client.get(f"/api/v1/incidents/{incident_id}/investigation")
+
+    assert response.status_code == 200
+    assert response.json() == report.model_dump(mode="json")
+
+
 def test_changed_firing_alert_attaches_to_open_incident(client: TestClient) -> None:
     first = post(client, payload()).json()
     changed = payload()
@@ -209,6 +237,36 @@ def test_postmortem_draft_is_assembled_from_persisted_incident_records(client: T
         "Follow-up",
     ]
     assert "does not infer a cause" in body["sections"][1]["body"]
+
+
+def test_postmortem_includes_latest_live_model_conclusion_when_recorded(
+    client: TestClient,
+) -> None:
+    incident_id = post(client, payload()).json()["incident_id"]
+    assert incident_id
+    report = InvestigationReport.model_validate(
+        {
+            "summary": "Alert, route telemetry, and deployment state support the conclusion.",
+            "hypotheses": [
+                {
+                    "root_cause": "FAIL_MODE is enabled for the controlled checkout workload.",
+                    "confidence": 0.96,
+                    "evidence_ids": ["persisted-alert"],
+                    "contradictory_evidence_ids": [],
+                }
+            ],
+            "recommended_next_step": "Review the controlled response restoration preview.",
+        }
+    )
+    client.app.state.store.record_investigation(incident_id, "gpt-5.6-terra", report)
+
+    response = client.get(f"/api/v1/incidents/{incident_id}/postmortem")
+
+    assert response.status_code == 200
+    conclusion = response.json()["sections"][1]["body"]
+    assert "latest live-model investigation" in conclusion
+    assert "confidence 0.96" in conclusion
+    assert "E-persis" in conclusion
 
 
 def test_action_plan_status_history_is_append_only(client: TestClient) -> None:

@@ -30,6 +30,9 @@ Open `http://127.0.0.1:5173`. The local cluster must be running before using
 the simulation controls. The console shows an explicit telemetry-unavailable
 state when Prometheus is not connected; it never draws synthetic data.
 
+For the four captured states of the controlled P1 walkthrough, see the
+[recorded walkthrough in the README](../README.md#recorded-controlled-p1-walkthrough).
+
 Confirm the API was restarted in the intended mode:
 
 ```powershell
@@ -142,8 +145,9 @@ After the incident is `Resolved`:
    external system.
 
 The RCA does not invent a root cause, customer impact, dependency topology, or
-prevention action when there is no supporting record. A live evidence-backed
-model conclusion can be included only after the GPT-5.6 path has been validated.
+prevention action when there is no supporting record. One direct GPT-5.6
+conclusion is recorded for the controlled P1 walkthrough; it is included only
+for that incident and retains its evidence identifiers and stated limitations.
 
 ## 7. Repeat safely
 

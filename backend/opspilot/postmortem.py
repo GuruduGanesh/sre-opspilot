@@ -7,6 +7,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from opspilot.domain.actions import ActionPlan
 from opspilot.domain.evidence import EvidenceRecord
+from opspilot.domain.investigation import InvestigationReport
 
 
 class PostmortemAction(BaseModel):
@@ -49,6 +50,7 @@ class PostmortemService:
         evidence: list[EvidenceRecord],
         actions: list[ActionPlan],
         timeline: list[dict[str, str]],
+        investigation: InvestigationReport | None = None,
     ) -> PostmortemDraft:
         action_items = [
             PostmortemAction(
@@ -69,6 +71,7 @@ class PostmortemService:
             if verified_actions
             else "No independently verified remediation is recorded."
         )
+        investigation_section = self._investigation_section(investigation)
         sections = [
             PostmortemSection(
                 heading="Incident context",
@@ -77,14 +80,7 @@ class PostmortemService:
                     f"{incident['lifecycle_state']}. The draft is based on {source_summary}."
                 ),
             ),
-            PostmortemSection(
-                heading="Investigation conclusion",
-                body=(
-                    "No model-backed root-cause conclusion is recorded for this incident. "
-                    "This controlled RCA preserves the observed evidence and does not "
-                    "infer a cause."
-                ),
-            ),
+            investigation_section,
             PostmortemSection(
                 heading="Recovery and verification",
                 body=(
@@ -122,4 +118,39 @@ class PostmortemService:
             actions=action_items,
             timeline=timeline,
             sections=sections,
+        )
+
+    @staticmethod
+    def _investigation_section(
+        investigation: InvestigationReport | None,
+    ) -> PostmortemSection:
+        if investigation is None:
+            return PostmortemSection(
+                heading="Investigation conclusion",
+                body=(
+                    "No model-backed root-cause conclusion is recorded for this incident. "
+                    "This controlled RCA preserves the observed evidence and does not "
+                    "infer a cause."
+                ),
+            )
+        if investigation.mode != "live_model":
+            return PostmortemSection(
+                heading="Investigation conclusion",
+                body=(
+                    "A controlled-simulation investigation is recorded for this incident. "
+                    "It is not a model-backed root-cause conclusion, so this RCA preserves "
+                    "the observed evidence and does not infer a cause."
+                ),
+            )
+
+        hypothesis = investigation.hypotheses[0]
+        evidence_refs = ", ".join(f"E-{evidence_id[:6]}" for evidence_id in hypothesis.evidence_ids)
+        return PostmortemSection(
+            heading="Investigation conclusion",
+            body=(
+                "The latest live-model investigation reported: "
+                f"{hypothesis.root_cause} (confidence {hypothesis.confidence:.2f}; "
+                f"evidence {evidence_refs}). Its evidence-bounded summary was: "
+                f"{investigation.summary}"
+            ),
         )

@@ -366,6 +366,20 @@ class SQLiteIncidentStore:
                     datetime.now(UTC).isoformat(),
                 ),
             )
+
+    def latest_investigation(self, incident_id: str) -> InvestigationReport | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT report_json FROM investigation_runs
+                WHERE incident_id = ?
+                ORDER BY created_at DESC, id DESC
+                LIMIT 1
+                """,
+                (incident_id,),
+            ).fetchone()
+        return InvestigationReport.model_validate_json(row["report_json"]) if row else None
+
     def create_action_plan(self, plan: ActionPlan) -> None:
         now = datetime.now(UTC).isoformat()
         with self._connect() as connection:

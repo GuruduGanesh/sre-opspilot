@@ -29,11 +29,11 @@ verified in [PROGRESS.md](PROGRESS.md).
 | The repository contains the project architecture and delivery plan. | Verified | Files and Git history |
 | Local prerequisites are available: Docker, kind, kubectl, Python, Node, and Git. | Verified | Recorded version checks in `PROGRESS.md` |
 | OpsPilot collects live controlled Kubernetes/Prometheus telemetry. | Verified (controlled) | P1/P2 end-to-end scripts and saved evaluation artifact |
-| OpsPilot identifies the P1 cause with GPT-5.6. | Not claimable yet | Successful live GPT-5.6 investigation with evidence-linked hypothesis |
+| In one controlled P1 run, OpsPilot obtained an evidence-cited GPT-5.6 conclusion about the simulated checkout failure. | Verified (controlled P1 only) | Persisted direct GPT-5.6 report, ignored local model-selection artifact, and `docs/assets/screenshots/02-p1-incident-overview-wide.png` / `04-recovery-rca.png` |
 | OpsPilot proposes a controlled recovery and blocks execution before human approval. | Verified (controlled) | P1/P2 remediation flows and action-policy tests |
 | OpsPilot verifies recovery after an approved action. | Verified (controlled) | P1/P2 remediation flows with independent verifier output |
 | OpsPilot supports the OOMKill/P2 scenario. | Verified (controlled) | Repeatable P2 remediation run with OOMKill and recovery evidence |
-| OpsPilot creates an audit-derived postmortem draft. | Complete (contract verification) | Postmortem endpoint and persisted incident audit record; capture a live UI result before video |
+| OpsPilot creates an audit-derived postmortem draft. | Verified (controlled) | Persisted incident audit record and `docs/assets/screenshots/04-recovery-rca.png` |
 | OpsPilot reduces MTTR, improves accuracy, or lowers cost. | Not claimable yet | Defined baseline, method, raw measurements, and repeatable result |
 | OpsPilot is production ready or works on any cluster. | Not claimable | Out of scope for this Build Week submission |
 
