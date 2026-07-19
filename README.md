@@ -7,6 +7,8 @@ track. It brings Kubernetes events, logs, metrics, and deployment history into o
 incident investigation, helping on-call engineers understand what changed, assess
 impact, and decide on a safe response.
 
+**Demo:** [Watch the 2-minute 48-second walkthrough on YouTube](https://youtu.be/iAHV63k_yGw)
+
 ## Current build
 
 The local demonstration includes:
