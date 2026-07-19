@@ -301,7 +301,16 @@ def test_action_plan_status_history_is_append_only(client: TestClient) -> None:
     ]
 
 
-def test_incident_action_endpoint_rehydrates_persisted_plan(client: TestClient) -> None:
+def test_incident_action_endpoint_rehydrates_persisted_plan(
+    client: TestClient, monkeypatch
+) -> None:
+    def reject_kubernetes_initialization() -> None:
+        raise AssertionError("read-only action history must not initialize Kubernetes")
+
+    monkeypatch.setattr(
+        "opspilot.remediation.config.load_kube_config",
+        reject_kubernetes_initialization,
+    )
     incident_id = post(client, payload()).json()["incident_id"]
     assert incident_id
     evidence_id = client.get(f"/api/v1/incidents/{incident_id}/evidence").json()[0]["id"]

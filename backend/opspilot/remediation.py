@@ -36,21 +36,19 @@ class KubernetesRemediationAdapter:
         allowed_namespace: str = "opspilot-demo",
         allowed_workloads: set[str] | None = None,
     ) -> None:
-        if apps_api is None:
-            config.load_kube_config()
-            apps_api = client.AppsV1Api()
         self._apps_api = apps_api
         self._allowed_namespace = allowed_namespace
         self._allowed_workloads = allowed_workloads or {"checkout"}
 
     def resource_version(self, namespace: str, workload: str) -> str:
         self._validate_target(namespace, workload)
-        deployment = self._apps_api.read_namespaced_deployment(workload, namespace)
+        deployment = self._api().read_namespaced_deployment(workload, namespace)
         return deployment.metadata.resource_version
 
     def preview(self, proposal: ActionProposal) -> dict[str, object]:
         self._validate_target(proposal.namespace, proposal.workload)
-        deployment = self._apps_api.read_namespaced_deployment(
+        apps_api = self._api()
+        deployment = apps_api.read_namespaced_deployment(
             proposal.workload, proposal.namespace
         )
         if deployment.metadata.resource_version != proposal.expected_resource_version:
@@ -62,7 +60,7 @@ class KubernetesRemediationAdapter:
                 "a different allowlisted action"
             )
         patch = self._patch(proposal)
-        response = self._apps_api.patch_namespaced_deployment(
+        response = apps_api.patch_namespaced_deployment(
             proposal.workload,
             proposal.namespace,
             patch,
@@ -79,7 +77,7 @@ class KubernetesRemediationAdapter:
 
     def execute(self, proposal: ActionProposal) -> dict[str, object]:
         self._validate_target(proposal.namespace, proposal.workload)
-        response = self._apps_api.patch_namespaced_deployment(
+        response = self._api().patch_namespaced_deployment(
             proposal.workload, proposal.namespace, self._patch(proposal)
         )
         return {
@@ -87,6 +85,14 @@ class KubernetesRemediationAdapter:
             "target": f"{proposal.namespace}/deployments/{proposal.workload}",
             "resource_version": response.metadata.resource_version,
         }
+
+    def _api(self) -> client.AppsV1Api:
+        """Load Kubernetes configuration only when a cluster operation is requested."""
+
+        if self._apps_api is None:
+            config.load_kube_config()
+            self._apps_api = client.AppsV1Api()
+        return self._apps_api
 
     @staticmethod
     def _patch(proposal: ActionProposal) -> dict[str, object]:
