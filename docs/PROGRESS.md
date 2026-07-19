@@ -108,6 +108,7 @@ development experiments only.
 | 2026-07-19 | Prepared final public submission assets. | `README.md` links the public 2:48 YouTube walkthrough, public screenshots cover the command center through RCA, the Devpost feedback ID was supplied in the submission, and the recorded voiceover states that Codex was the implementation partner for backend, safety gates, and tests. |
 | 2026-07-19 | Published the GitHub demo-bundle release. | Created `v0.1.0` at `https://github.com/GuruduGanesh/sre-opspilot/releases/tag/v0.1.0` and uploaded `opspilot-checkout-0.1.tar` as a release asset. GitHub API reported the asset as `uploaded`, size `51697152`; a public HEAD request to the direct asset URL returned HTTP 200 with the same content length. The release is titled `OpsPilot 0.1 - prebuilt demo bundle`. |
 | 2026-07-19 | Removed the Kubernetes dependency from read-only action-history retrieval. | The Kubernetes remediation client now initializes only when a cluster operation is requested. The formerly failing persisted-plan endpoint passed with an intentionally missing kubeconfig; Ruff, Ty, all 59 tests on Python 3.12 and isolated Python 3.14, and the frontend production build passed. CI confirmation awaits the next push. |
+| 2026-07-19 | Confirmed the public CI pipeline is green. | GitHub Actions run `29704798050` passed for fix commit `56ff695`: the backend job completed Ruff, Ty, and all 59 tests on the Linux/Python 3.14 runner, and the frontend production-build job passed. |
 
 ## Immediate backlog
 
