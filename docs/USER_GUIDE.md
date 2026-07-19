@@ -40,12 +40,20 @@ Invoke-RestMethod http://127.0.0.1:8000/healthz
 # Expected: status = ok; investigation_mode = controlled_simulation
 ```
 
-For a fresh start, stop the API first, run
-`.\scripts\prepare-demo.ps1 -ClearIncidentHistory`, then start it again with
-the command above. The clear operation removes only ignored local incident
-history and resets the dedicated demo workload. A browser tab pointing to a
-deleted incident will show no record; return to `http://127.0.0.1:5173` and
-start a new scenario.
+For a read-only local infrastructure check before opening the console, run:
+
+```powershell
+.\scripts\demo-proof.ps1
+```
+
+It displays the kind cluster, demo workloads, Prometheus readiness, API mode,
+and console address. Add `-RequireLiveModel` only for a final live-model demo.
+
+For a fresh start, run `.\scripts\prepare-demo.ps1 -ClearIncidentHistory`.
+It stops only the local OpsPilot API if it is running, resets the dedicated demo
+workload, removes ignored local incident history, and starts the API again in
+the same investigation mode. A browser tab pointing to a deleted incident will
+show no record; return to `http://127.0.0.1:5173` and start a new scenario.
 
 ## 2. Start a controlled incident
 
@@ -125,8 +133,10 @@ triage and collect more evidence rather than approving a speculative change.
 4. Click **Execute approved action**. The server rejects an expired, stale, or
    altered plan rather than executing it.
 5. Click **Verify recovery**. The independent verifier—not a model response—must
-   confirm recovery. P1 requires checkout readiness and the bounded 5xx metric;
-   P2 requires readiness and a stable restart count for 30 seconds.
+   confirm recovery. P1 requires checkout readiness, the bounded 5xx metric, and
+   observed checkout 2xx traffic. If traffic has not resumed yet, P1 remains in
+   `Monitoring` and **Check stability again** stays available; P2 requires
+   readiness and a stable restart count for 30 seconds.
 
 Only after verification does the lifecycle move to `Resolved`. If verification
 fails, return to triage and reassess the evidence. Never represent an action as

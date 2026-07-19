@@ -1,4 +1,4 @@
-import { FormEvent, StrictMode, useEffect, useMemo, useState } from "react";
+import { FormEvent, StrictMode, useEffect, useMemo, useRef, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import "./styles.css";
 
@@ -23,11 +23,11 @@ type Report = {
 type ActionPlan = {
   id: string; status: string; fingerprint: string;
   proposal: { action_type: string; evidence_ids: string[]; expires_at: string; expected_resource_version: string; requested_by?: string; proposed_at?: string | null };
-  preview: { target?: string; dry_run?: boolean; changes?: Array<{ field: string; before: string; after: string; effect?: string }>; verification_plan?: { independent?: boolean; checks?: Array<{ kind: string; condition?: string; query?: string; window?: string; maximum?: number }> } };
-  approved_by?: string; approved_at?: string | null; executed_at?: string | null; rejected_by?: string | null; rejected_at?: string | null; rejection_reason?: string | null;
+  preview: { target?: string; dry_run?: boolean; changes?: Array<{ field: string; before: string; after: string; effect?: string }>; verification_plan?: { independent?: boolean; checks?: Array<{ kind: string; condition?: string; query?: string; window?: string; maximum?: number; minimum?: number }> } };
+  approved_by?: string; approved_at?: string | null; executed_at?: string | null; rejected_by?: string | null; rejected_at?: string | null; rejection_reason?: string | null; invalidated_at?: string | null; invalidation_reason?: string | null;
   recovery?: RecoveryResult | null;
 };
-type RecoveryResult = { recovered: boolean; pending?: boolean; reason: string; workload: { ready_replicas: number; desired_replicas: number }; service_5xx_rate?: number | null; stability_window_remaining_seconds?: number | null };
+type RecoveryResult = { recovered: boolean; pending?: boolean; reason: string; workload: { ready_replicas: number; desired_replicas: number }; service_5xx_rate?: number | null; service_2xx_rate?: number | null; stability_window_remaining_seconds?: number | null };
 type Postmortem = { summary: string; lifecycle_state: string; evidence_count: number; actions: Array<{ action_id: string; action_type: string; status: string; approved_by?: string }>; timeline: TimelineItem[]; sections: Array<{ heading: string; body: string }> };
 type DemoScenario = { incident_id: string; scenario: string; recommended_action: string; message: string };
 type Dashboard = {
@@ -35,7 +35,7 @@ type Dashboard = {
   workload?: { ready_replicas: number; desired_replicas: number; restart_count: number; observed_at: string } | null;
   deployment_history: Array<{ revision: string; images: string[]; controlled_config: Record<string, string>; observed_at: string }>;
   events: Array<{ reason: string; message: string; event_type: string; involved_object: string; observed_at: string }>;
-  telemetry: { status: string; message?: string | null; method: string; route: string; rate_window: string; recovery_window: string; error_rate?: number | null; request_rate?: number | null; recovery_error_rate?: number | null; error_ratio?: number | null; recovery_state: string; error_rate_trend: Array<{ observed_at: string; value: number }> };
+  telemetry: { status: string; message?: string | null; method: string; route: string; rate_window: string; recovery_window: string; error_rate?: number | null; success_rate?: number | null; request_rate?: number | null; recovery_error_rate?: number | null; error_ratio?: number | null; recovery_state: string; error_rate_trend: Array<{ observed_at: string; value: number }>; success_rate_trend: Array<{ observed_at: string; value: number }> };
   blast_radius: { status: string; workload: string; namespace: string; method: string; route: string; configured_callers: string[]; downstream_dependencies: string[]; message: string };
   service_context: { namespace: string; workload: string; image?: string | null; revision?: string | null; revision_observed_at?: string | null; controlled_config: Record<string, string>; ready_replicas?: number | null; desired_replicas?: number | null };
   situation_summary: string;
@@ -54,10 +54,25 @@ declare global {
 async function jsonOrError<T>(response: Promise<Response>): Promise<T> {
   const completed = await response;
   if (!completed.ok) {
-    const body = (await completed.json().catch(() => ({}))) as { detail?: string };
-    throw new Error(body.detail ?? `Request failed (${completed.status})`);
+    const body = (await completed.json().catch(() => ({}))) as { detail?: unknown };
+    const detail = body.detail;
+    const message = apiErrorMessage(detail, completed.status);
+    throw new Error(message);
   }
   return completed.json() as Promise<T>;
+}
+
+function apiErrorMessage(detail: unknown, status: number): string {
+  if (typeof detail === "string") return detail;
+  if (Array.isArray(detail)) {
+    const messages = detail.flatMap((item) => {
+      if (item && typeof item === "object" && "msg" in item && typeof item.msg === "string") return [item.msg];
+      return [];
+    });
+    if (messages.length) return messages.join(" ");
+  }
+  if (detail && typeof detail === "object" && "message" in detail && typeof detail.message === "string") return detail.message;
+  return `Request failed (${status})`;
 }
 
 function formatTime(value?: string): string {
@@ -110,19 +125,23 @@ function expiresIn(value: string, now: number): string {
   return seconds > 0 ? `expires in ${elapsed(seconds)}` : "expired — create a new preview";
 }
 
-function RateTrend({ points, service, method, route }: { points: Dashboard["telemetry"]["error_rate_trend"]; service: string; method: string; route: string }) {
-  const path = useMemo(() => {
-    if (points.length < 2) return "";
-    const values = points.map((point) => point.value);
-    const max = Math.max(...values, 0.001);
-    return points.map((point, index) => {
-      const x = (index / (points.length - 1)) * 100;
+function RateTrend({ failurePoints, successPoints, service, method, route }: { failurePoints: Dashboard["telemetry"]["error_rate_trend"]; successPoints: Dashboard["telemetry"]["success_rate_trend"]; service: string; method: string; route: string }) {
+  const { failurePath, successPath } = useMemo(() => {
+    const series = [failurePoints, successPoints].filter((points) => points.length >= 2);
+    if (!series.length) return { failurePath: "", successPath: "" };
+    const max = Math.max(...series.flatMap((points) => points.map((point) => point.value)), 0.001);
+    const timestamps = series.flatMap((points) => points.map((point) => Date.parse(point.observed_at)));
+    const start = Math.min(...timestamps);
+    const duration = Math.max(Math.max(...timestamps) - start, 1);
+    const pathFor = (points: Dashboard["telemetry"]["error_rate_trend"]) => points.length < 2 ? "" : points.map((point, index) => {
+      const x = ((Date.parse(point.observed_at) - start) / duration) * 100;
       const y = 92 - (point.value / max) * 72;
       return `${index === 0 ? "M" : "L"}${x.toFixed(2)},${y.toFixed(2)}`;
     }).join(" ");
-  }, [points]);
-  if (!path) return <div className="chart-empty">Trend appears when the controlled Prometheus endpoint is connected for {service} {method} {route}.</div>;
-  return <svg className="trend-chart" viewBox="0 0 100 100" preserveAspectRatio="none" role="img" aria-label={`${service} ${method} ${route} HTTP 5xx requests per second over the last 15 minutes`}><defs><linearGradient id="rate-fill" x1="0" x2="0" y1="0" y2="1"><stop stopColor="#fb7185" stopOpacity=".45"/><stop offset="1" stopColor="#fb7185" stopOpacity="0"/></linearGradient></defs><path d={`${path} L100,100 L0,100 Z`} fill="url(#rate-fill)"/><path d={path} fill="none" stroke="#fb7185" strokeWidth="2.4" vectorEffect="non-scaling-stroke"/></svg>;
+    return { failurePath: pathFor(failurePoints), successPath: pathFor(successPoints) };
+  }, [failurePoints, successPoints]);
+  if (!failurePath && !successPath) return <div className="chart-empty">Response trend appears when the controlled Prometheus endpoint is connected for {service} {method} {route}.</div>;
+  return <svg className="trend-chart" viewBox="0 0 100 100" preserveAspectRatio="none" role="img" aria-label={`${service} ${method} ${route} HTTP 5xx failure and 2xx success requests per second over the last 15 minutes`}><defs><linearGradient id="failure-rate-fill" x1="0" x2="0" y1="0" y2="1"><stop stopColor="#fb7185" stopOpacity=".45"/><stop offset="1" stopColor="#fb7185" stopOpacity="0"/></linearGradient><linearGradient id="success-rate-fill" x1="0" x2="0" y1="0" y2="1"><stop stopColor="#34d399" stopOpacity=".34"/><stop offset="1" stopColor="#34d399" stopOpacity="0"/></linearGradient></defs>{successPath && <><path d={`${successPath} L100,100 L0,100 Z`} fill="url(#success-rate-fill)"/><path d={successPath} fill="none" stroke="#34d399" strokeWidth="2.4" vectorEffect="non-scaling-stroke"/></>}{failurePath && <><path d={`${failurePath} L100,100 L0,100 Z`} fill="url(#failure-rate-fill)"/><path d={failurePath} fill="none" stroke="#fb7185" strokeWidth="2.4" vectorEffect="non-scaling-stroke"/></>}</svg>;
 }
 
 function App() {
@@ -148,6 +167,7 @@ function App() {
   const [demoScenario, setDemoScenario] = useState<"p1" | "p2">("p1");
   const [approvalOpen, setApprovalOpen] = useState(false);
   const [now, setNow] = useState(Date.now());
+  const liveRefreshInFlight = useRef(false);
 
   useEffect(() => {
     const timer = window.setInterval(() => setNow(Date.now()), 1_000);
@@ -178,11 +198,15 @@ function App() {
     const selectedIncidentId = incident.id;
     let mounted = true;
     const refreshLiveSignals = async () => {
+      if (liveRefreshInFlight.current) return;
+      liveRefreshInFlight.current = true;
       try {
         const next = await jsonOrError<Dashboard>(fetch(`${apiBaseUrl}/api/v1/incidents/${encodeURIComponent(selectedIncidentId)}/dashboard`));
         if (mounted) setDashboard(next);
       } catch {
         // Keep the last good snapshot visible; the manual refresh reports failures.
+      } finally {
+        liveRefreshInFlight.current = false;
       }
     };
     const timer = window.setInterval(() => void refreshLiveSignals(), 5_000);
@@ -320,7 +344,7 @@ function App() {
     setLoading(true);
     try {
       const result = await jsonOrError<ActionPlan>(fetch(`${apiBaseUrl}/api/v1/incidents/${incident.id}/actions/preview`, {
-        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action_type: actionType, evidence_ids: evidence.map((item) => item.id), requested_by: operatorName }),
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action_type: actionType, evidence_ids: evidence.slice(-20).map((item) => item.id), requested_by: operatorName }),
       }));
       setPlan(result); setRecovery(null); setMessage("");
     } catch (error) { setMessage(error instanceof Error ? error.message : "Preview failed."); }
@@ -358,7 +382,14 @@ function App() {
       const result = await jsonOrError<ActionPlan | { plan: ActionPlan; recovery: RecoveryResult }>(fetch(`${apiBaseUrl}/api/v1/actions/${plan.id}/${path}`, { method: "POST" }));
       if ("plan" in result) { setPlan(result.plan); setRecovery(result.recovery); } else { setPlan(result); }
       setMessage(""); await refreshDashboard();
-    } catch (error) { setMessage(error instanceof Error ? error.message : "Action update failed."); }
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : "Action update failed.";
+      if (path === "execute" && detail.includes("stale") && incident) {
+        try { await openIncident(incident.id); await refreshQueue(); await refreshDashboard(); }
+        catch { /* The server's stale-plan state remains visible after a manual refresh. */ }
+      }
+      setMessage(detail);
+    }
     finally { setLoading(false); }
   }
 
@@ -405,10 +436,11 @@ function App() {
 
       <section className="metric-grid" aria-label="Current controlled signals">
         <Metric label="5xx requests / second" value={metric(telemetry?.error_rate)} detail={telemetry?.status === "live" ? `${dashboard.service} ${telemetry.method} ${telemetry.route} · HTTP 5xx · ${telemetry.rate_window} rate` : "Telemetry not connected"} tone="danger"/>
+        <Metric label="2xx requests / second" value={metric(telemetry?.success_rate)} detail={telemetry?.status === "live" ? `${dashboard.service} ${telemetry.method} ${telemetry.route} · HTTP 2xx · ${telemetry.rate_window} rate` : "Telemetry not connected"} tone="success"/>
         <Metric label="Request rate" value={metric(telemetry?.request_rate)} detail={`${dashboard.service} ${telemetry?.method ?? "GET"} ${telemetry?.route ?? "/checkout"} · all statuses · ${telemetry?.rate_window ?? "1m"} rate`} tone="neutral"/>
         <Metric label="Error ratio" value={telemetry?.error_ratio === undefined || telemetry?.error_ratio === null ? "—" : `${percentage(telemetry.error_ratio)} failing`} detail={`${dashboard.service} ${telemetry?.method ?? "GET"} ${telemetry?.route ?? "/checkout"} · current ${telemetry?.rate_window ?? "1m"} ratio`} tone={telemetry?.error_ratio && telemetry.error_ratio > 0 ? "danger" : "success"}/>
         <Metric label="Workload health" value={dashboard.workload ? `${dashboard.workload.ready_replicas}/${dashboard.workload.desired_replicas}` : "—"} detail={dashboard.workload ? `${dashboard.workload.restart_count} pod restarts observed` : "Kubernetes read unavailable"} tone={dashboard.workload?.ready_replicas === dashboard.workload?.desired_replicas ? "success" : "warning"}/>
-        <Metric label={`Recovery gate · ${telemetry?.recovery_state?.toUpperCase() ?? "UNKNOWN"}`} value={metric(telemetry?.recovery_error_rate)} detail={`${dashboard.service} ${telemetry?.method ?? "GET"} ${telemetry?.route ?? "/checkout"} · 5xx ≤ 0.010/s over ${telemetry?.recovery_window ?? "15s"}`} tone={telemetry?.recovery_state === "passing" ? "success" : telemetry?.recovery_state === "failing" ? "danger" : "warning"}/>
+        <Metric label={`Recovery gate · ${telemetry?.recovery_state?.toUpperCase() ?? "UNKNOWN"}`} value={metric(telemetry?.recovery_error_rate)} detail={`${dashboard.service} ${telemetry?.method ?? "GET"} ${telemetry?.route ?? "/checkout"} · 5xx ≤ 0.010/s + 2xx ≥ 0.010/s over ${telemetry?.recovery_window ?? "15s"}`} tone={telemetry?.recovery_state === "passing" ? "success" : telemetry?.recovery_state === "failing" ? "danger" : "warning"}/>
         <Metric label={report?.hypotheses[0] ? (report.mode === "controlled_simulation" ? "Simulation confidence" : "Model confidence") : "Investigation"} value={report?.hypotheses[0] ? `${Math.round(report.hypotheses[0].confidence * 100)}%` : "Not run"} detail={report ? report.provenance : dashboard.investigation_mode === "controlled_simulation" ? "Deterministic rehearsal mode · not GPT-5.6" : "Run a live investigation below"} tone="accent"/>
       </section>
 
@@ -416,12 +448,12 @@ function App() {
         <aside className="lifecycle-rail"><section className="queue-rail" aria-label="Open incident queue"><div className="queue-rail-heading"><p className="rail-title">{queueHeading}</p><button className="ghost-button" type="button" onClick={() => void refreshQueue()}>Refresh</button></div>{queue.length ? <ul className="queue-bullets">{queue.slice(0, 5).map((item) => <li key={item.id}><button className={item.id === incident?.id ? "selected" : ""} type="button" aria-label={`Open ${item.alert_name} incident ${item.id.slice(-6)}`} onClick={() => void openIncident(item.id)}><span className={`queue-severity severity-${item.severity.toLowerCase()}`}/><span><strong>{item.alert_name}</strong><small>{queueServices.length > 1 ? `${item.service} · ` : ""}{displayState(item.lifecycle_state)} · {incidentAge(item.created_at)} · #{item.id.slice(-6)}</small></span></button></li>)}</ul> : <p className="queue-empty">{queueLoaded ? "No open incidents" : "Loading queue…"}</p>}{queue.length > 5 && <p className="queue-more">Priority set · refresh for newer alerts</p>}</section><p className="rail-title">Incident lifecycle</p>{lifecycle.map((stage, index) => <div className={`lifecycle-step ${index < currentStage ? "complete" : ""} ${index === currentStage ? "current" : ""}`} key={stage}><span>{index < currentStage ? "✓" : index + 1}</span><strong>{displayState(stage)}</strong></div>)}<div className="rail-note">Server-owned transitions prevent a model or browser from marking remediation complete.</div></aside>
 
         <section className="main-pane">
-          <section className="panel telemetry-panel"><div className="panel-heading"><div><p className="eyebrow">Live telemetry · controlled route</p><h2>{dashboard.service} {telemetry?.method ?? "GET"} {telemetry?.route ?? "/checkout"} · HTTP 5xx trend</h2></div><div className="telemetry-actions"><span>Auto-refresh · 5s · {formatTime(dashboard.observed_at)}</span><button className="ghost-button" type="button" onClick={refreshDashboard}>Refresh</button></div></div><RateTrend points={telemetry?.error_rate_trend ?? []} service={dashboard.service} method={telemetry?.method ?? "GET"} route={telemetry?.route ?? "/checkout"}/><div className="chart-footer"><span>15-minute trend · {telemetry?.recovery_window ?? "15s"} 5xx rate · Prometheus</span><strong>{telemetry?.status === "live" ? metric(telemetry.error_rate) : telemetry?.message ?? "Not configured"}</strong></div></section>
+          <section className="panel telemetry-panel"><div className="panel-heading"><div><p className="eyebrow">Live telemetry · controlled route</p><h2>{dashboard.service} {telemetry?.method ?? "GET"} {telemetry?.route ?? "/checkout"} · HTTP response rate trend</h2></div><div className="telemetry-actions"><span>Auto-refresh · 5s · {formatTime(dashboard.observed_at)}</span><button className="ghost-button" type="button" onClick={refreshDashboard}>Refresh</button></div></div><div className="chart-legend"><span className="trend-failure">5xx failure rate</span><span className="trend-success">2xx success rate</span></div><RateTrend failurePoints={telemetry?.error_rate_trend ?? []} successPoints={telemetry?.success_rate_trend ?? []} service={dashboard.service} method={telemetry?.method ?? "GET"} route={telemetry?.route ?? "/checkout"}/><div className="chart-footer"><span>15-minute trend · {telemetry?.recovery_window ?? "15s"} rate · Prometheus</span><strong className={telemetry?.recovery_state === "passing" ? "telemetry-passing" : ""}>{telemetry?.status === "live" ? `${metric(telemetry.error_rate)} 5xx · ${metric(telemetry.success_rate)} 2xx` : telemetry?.message ?? "Not configured"}</strong></div></section>
 
           <section className="three-column">
             <section className="panel"><p className="eyebrow">Service context</p><h2>{dashboard.service_context.namespace}/{dashboard.service_context.workload}</h2><div className="context-facts"><span>Image</span><strong>{dashboard.service_context.image ?? "Not returned"}</strong><span>Revision</span><strong>{dashboard.service_context.revision ? `${dashboard.service_context.revision} · ${formatTime(dashboard.service_context.revision_observed_at ?? undefined)}` : "Not returned"}</strong><span>Readiness</span><strong>{dashboard.service_context.ready_replicas ?? "—"}/{dashboard.service_context.desired_replicas ?? "—"} ready</strong>{Object.entries(dashboard.service_context.controlled_config).map(([name, value]) => <div className="context-config" key={name}><span>Controlled setting</span><strong>{name}={value}</strong></div>)}</div></section>
             <section className="panel"><p className="eyebrow">Scope / blast radius</p><h2>Known controlled traffic path</h2><div className="scope-card"><strong>{dashboard.blast_radius.namespace}/{dashboard.blast_radius.workload}</strong><span>Directly affected endpoint · {dashboard.blast_radius.method} {dashboard.blast_radius.route}</span></div><div className="scope-list"><span>Configured traffic source</span>{dashboard.blast_radius.configured_callers.map((caller) => <strong key={caller}>{caller}</strong>)}<span>Downstream dependencies</span>{dashboard.blast_radius.downstream_dependencies.length ? dashboard.blast_radius.downstream_dependencies.map((dependency) => <strong key={dependency}>{dependency}</strong>) : <strong>None instrumented in this scenario</strong>}</div><p className="muted">{dashboard.blast_radius.message}</p></section>
-            <section className="panel"><p className="eyebrow">SLI and recovery policy</p><h2>No SLO invented</h2><p className="muted">{dashboard.slo_message}</p><div className="policy-line"><span>Recovery verification</span><strong>{actionType === "restore_memory_mode" || actionType === "restart" ? "Readiness + 30s restart stability" : "Readiness + 15s 5xx threshold"}</strong></div></section>
+            <section className="panel"><p className="eyebrow">SLI and recovery policy</p><h2>No SLO invented</h2><p className="muted">{dashboard.slo_message}</p><div className="policy-line"><span>Recovery verification</span><strong>{actionType === "restore_memory_mode" || actionType === "restart" ? "Readiness + 30s restart stability" : "Readiness + 15s 5xx threshold + observed 2xx traffic"}</strong></div></section>
           </section>
 
           <section className="panel investigation-panel"><p className="eyebrow">Conversational investigation</p><h2>Ask a follow-up question</h2><p className="muted">Each question takes a fresh Prometheus and Kubernetes evidence snapshot. The model can cite it, but can never execute a remediation.</p>{dashboard.investigation_mode === "controlled_simulation" ? <p className="simulation-notice">Controlled rehearsal reports are enabled. They are deterministic evidence summaries, not GPT-5.6 output.</p> : <p className="muted">Live-model mode is active. If API access is unavailable, restart the local API with <code>run-console.ps1 -ControlledSimulation</code> for an explicitly labelled rehearsal.</p>}<div className="question-chips"><button type="button" onClick={() => setQuestion("What changed before the alert?")}>What changed?</button><button type="button" onClick={() => setQuestion("What evidence supports the current root-cause hypothesis?")}>Show evidence</button><button type="button" onClick={() => setQuestion("What is the confirmed affected scope?")}>What is affected?</button><button type="button" onClick={() => setQuestion("What are the current 5xx rate, request rate, readiness, and restarts?")}>Current health</button></div><div className="chat-compose"><input value={question} onChange={(event) => setQuestion(event.target.value)} aria-label="Ask about the incident"/><button disabled={loading} type="button" onClick={investigate}>{loading ? "Collecting evidence…" : "Investigate"}</button></div>
@@ -435,7 +467,7 @@ function App() {
           <section className="panel compact"><p className="eyebrow">Cluster events</p><h2>Current Kubernetes context</h2>{dashboard.events.length ? <div className="event-list">{dashboard.events.map((event, index) => <article key={`${event.observed_at}-${index}`}><span>{event.event_type}</span><strong>{event.reason}</strong><p>{event.message}</p><time>{formatTime(event.observed_at)} · {event.involved_object}</time></article>)}</div> : <p className="muted">No matching Kubernetes events were returned for this workload.</p>}</section>
           <section className="panel compact"><p className="eyebrow">Deployment history</p><h2>Revisions · current first</h2>{dashboard.deployment_history.length ? <div className="deployment-list">{dashboard.deployment_history.map((revision) => <div key={revision.revision}><strong>Revision {revision.revision}</strong><span>{revision.images.join(", ")}</span>{Object.entries(revision.controlled_config).map(([name, value]) => <span key={name}>{name}={value}</span>)}<time>ReplicaSet created {formatTime(revision.observed_at)}</time></div>)}</div> : <p className="muted">Deployment history is unavailable.</p>}</section>
           <section className="panel approval-panel"><p className="eyebrow">Human approval gate</p><h2>Propose a controlled restoration</h2><p className="muted">A preview validates an allowlisted Kubernetes patch but does not apply it. An explicit human approval is required before execution.</p>{incident.lifecycle_state === "Triaging" && <p className="state-message">Investigation is read-only and keeps the incident in triage. Review the evidence, then create a dry-run preview to move to Action Proposed.</p>}<select value={actionType} onChange={(event) => setActionType(event.target.value)} aria-label="Allowlisted action"><option value="restore_response_mode">Restore checkout response mode</option><option value="restore_memory_mode">Restore controlled memory mode</option><option value="restart">Restart checkout workload</option><option value="scale">Scale checkout workload</option></select><button disabled={loading || incident.lifecycle_state === "Resolved"} type="button" onClick={previewAction}>Create dry-run preview</button>{incident.lifecycle_state === "Resolved" && <p className="muted">This incident is resolved. New remediation proposals are correctly blocked.</p>}
-            {plan && <article className="action-plan"><div className="action-plan-heading"><span className="status-chip">{plan.status}</span><span className="plan-expiry">plan {shortId(plan.fingerprint)} · {expiresIn(plan.proposal.expires_at, now)}</span></div><h3>{actionLabel(plan.proposal.action_type)}</h3><p className="plan-target">Target: {plan.preview.target ?? "Controlled workload target"}</p><p className="plan-meta">Requested by {plan.proposal.requested_by ?? "local-oncall"} (self-declared local identity){plan.proposal.proposed_at ? ` · plan created ${formatTime(plan.proposal.proposed_at)}` : ""}</p><div className="plan-rationale"><strong>Evidence binding</strong><p>This plan is tied to persisted records from this incident; review the records before approving.</p><div className="evidence-chips">{plan.proposal.evidence_ids.map((id) => <a href={`#evidence-${id}`} key={id} title={evidenceById.get(id)?.summary ?? "Persisted incident evidence"}>E-{shortId(id)}</a>)}</div></div><div className="planned-changes"><strong>What will change</strong><p>Current deployment values read by the server; the dry-run validates the same patch. Nothing has been applied yet.</p>{plan.preview.changes?.length ? plan.preview.changes.map((change) => <div className="change-row" key={change.field}><code>{change.field}</code><span>{change.before}</span><b>→</b><span>{change.after}</span>{change.effect && <small>{change.effect}</small>}</div>) : <p className="muted">The dry-run succeeded, but this adapter did not return a normalized before/after value.</p>}</div><p className={plan.preview.dry_run ? "preview-success" : "preview-warning"}>{plan.preview.dry_run ? "Preview successful — nothing applied yet. Approving authorizes the exact change above." : "Preview data is unavailable; do not approve this plan."}</p><div className="verification-contract"><strong>Verified after apply</strong><p>Checked by the independent recovery verifier, not by the model.</p>{plan.preview.verification_plan?.checks?.map((check) => <div className="verification-check" key={check.kind}><strong>{check.kind.replaceAll("_", " ")}</strong><span>{check.condition ?? `${check.query} ≤ ${decimal(check.maximum)} / ${check.window ?? "—"}`}</span></div>)}</div><p className="binding-caption">Approval is bound to plan {shortId(plan.fingerprint)} and target version {plan.proposal.expected_resource_version}. Execution is refused if either changes first.</p>{plan.status === "Previewed" && <button type="button" onClick={() => setApprovalOpen(true)}>Review exact plan</button>}{plan.status === "Approved" && <><p className="state-message">Approved by {plan.approved_by}. Execution has not started.</p><button disabled={loading} type="button" onClick={() => updateAction("execute")}>Run approved controlled action</button></>}{plan.status === "Executed" && <><p className="state-message">Action applied at {formatTime(plan.executed_at ?? undefined)}. Independent verification is still required.</p>{recovery?.pending && <p className="state-message">Verification observation active: {recovery.reason}</p>}<button disabled={loading} type="button" onClick={() => updateAction("verify")}>{recovery?.pending ? "Check stability again" : "Verify recovery now"}</button></>}{plan.status === "Verified" && <p className="verification-success">Recovery verified{recovery?.reason ? `: ${recovery.reason}` : "."}</p>}{plan.status === "Failed" && <p className="preview-warning">Recovery was not verified{recovery?.reason ? `: ${recovery.reason}` : "."} The incident returned to triage.</p>}{plan.status === "Rejected" && <p className="state-message">Rejected by {plan.rejected_by}{plan.rejection_reason ? `: ${plan.rejection_reason}` : ""}. No cluster change was applied.</p>}{plan.status === "Expired" && <p className="preview-warning">This preview expired. Nothing was applied; create a new preview from triage.</p>}</article>}
+            {plan && <article className="action-plan"><div className="action-plan-heading"><span className="status-chip">{plan.status}</span><span className="plan-expiry">plan {shortId(plan.fingerprint)} · {expiresIn(plan.proposal.expires_at, now)}</span></div><h3>{actionLabel(plan.proposal.action_type)}</h3><p className="plan-target">Target: {plan.preview.target ?? "Controlled workload target"}</p><p className="plan-meta">Requested by {plan.proposal.requested_by ?? "local-oncall"} (self-declared local identity){plan.proposal.proposed_at ? ` · plan created ${formatTime(plan.proposal.proposed_at)}` : ""}</p><div className="plan-rationale"><strong>Evidence binding</strong><p>This plan is tied to persisted records from this incident; review the records before approving.</p><div className="evidence-chips">{plan.proposal.evidence_ids.map((id) => <a href={`#evidence-${id}`} key={id} title={evidenceById.get(id)?.summary ?? "Persisted incident evidence"}>E-{shortId(id)}</a>)}</div></div><div className="planned-changes"><strong>What will change</strong><p>Current deployment values read by the server; the dry-run validates the same patch. Nothing has been applied yet.</p>{plan.preview.changes?.length ? plan.preview.changes.map((change) => <div className="change-row" key={change.field}><code>{change.field}</code><span>{change.before}</span><b>→</b><span>{change.after}</span>{change.effect && <small>{change.effect}</small>}</div>) : <p className="muted">The dry-run succeeded, but this adapter did not return a normalized before/after value.</p>}</div><p className={plan.preview.dry_run ? "preview-success" : "preview-warning"}>{plan.preview.dry_run ? "Preview successful — nothing applied yet. Approving authorizes the exact change above." : "Preview data is unavailable; do not approve this plan."}</p><div className="verification-contract"><strong>Verified after apply</strong><p>Checked by the independent recovery verifier, not by the model.</p>{plan.preview.verification_plan?.checks?.map((check) => <div className="verification-check" key={`${check.kind}-${check.query ?? check.condition}`}><strong>{check.kind.replaceAll("_", " ")}</strong><span>{check.condition ?? `${check.query} ${check.minimum === undefined ? `≤ ${decimal(check.maximum)}` : `≥ ${decimal(check.minimum)}`} / ${check.window ?? "—"}`}</span></div>)}</div><p className="binding-caption">Approval is bound to plan {shortId(plan.fingerprint)} and target version {plan.proposal.expected_resource_version}. Execution is refused if either changes first.</p>{plan.status === "Previewed" && <button type="button" onClick={() => setApprovalOpen(true)}>Review exact plan</button>}{plan.status === "Approved" && <><p className="state-message">Approved by {plan.approved_by}. Execution has not started.</p><button disabled={loading} type="button" onClick={() => updateAction("execute")}>Run approved controlled action</button></>}{plan.status === "Executed" && <><p className="state-message">Action applied at {formatTime(plan.executed_at ?? undefined)}. Independent verification is still required.</p>{recovery?.pending && <p className="state-message">Verification observation active: {recovery.reason}</p>}<button disabled={loading} type="button" onClick={() => updateAction("verify")}>{recovery?.pending ? "Check stability again" : "Verify recovery now"}</button></>}{plan.status === "Verified" && <p className="verification-success">Recovery verified{recovery?.reason ? `: ${recovery.reason}` : "."}</p>}{plan.status === "Failed" && <p className="preview-warning">Recovery was not verified{recovery?.reason ? `: ${recovery.reason}` : "."} The incident returned to triage.</p>}{plan.status === "Stale" && <p className="preview-warning">Approved plan became stale before execution{plan.invalidation_reason ? `: ${plan.invalidation_reason}` : ""}. No cluster change was applied. Review the current evidence, then create a fresh preview from triage.</p>}{plan.status === "Rejected" && <p className="state-message">Rejected by {plan.rejected_by}{plan.rejection_reason ? `: ${plan.rejection_reason}` : ""}. No cluster change was applied.</p>}{plan.status === "Expired" && <p className="preview-warning">This preview expired. Nothing was applied; create a new preview from triage.</p>}</article>}
           </section>
           <section className="panel compact postmortem-card"><p className="eyebrow">Audit-derived postmortem</p><p>Creates a factual RCA draft from the persisted incident record after recovery is verified.</p><button className="ghost-button" disabled={incident.lifecycle_state !== "Resolved" && incident.lifecycle_state !== "RCA"} type="button" onClick={loadPostmortem}>Draft RCA</button>{incident.lifecycle_state !== "Resolved" && incident.lifecycle_state !== "RCA" && <p className="muted">Available after verified recovery.</p>}</section>
           {dashboard.collection_notes.length > 0 && <section className="collection-notes">{dashboard.collection_notes.map((note) => <p key={note}>{note}</p>)}</section>}

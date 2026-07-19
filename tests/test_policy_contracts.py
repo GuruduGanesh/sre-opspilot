@@ -59,6 +59,64 @@ def test_prometheus_adapter_formats_only_server_owned_promql_template() -> None:
     )
 
 
+def test_prometheus_adapter_retries_a_transient_connection_failure() -> None:
+    attempts = 0
+
+    def responder(_request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise httpx.ConnectError("port-forward connection reset")
+        return httpx.Response(200, json={"data": {"result": [{"value": [0, "0.02"]}]}})
+
+    adapter = PrometheusAdapter(
+        "http://prometheus.example", client=httpx.Client(transport=httpx.MockTransport(responder))
+    )
+
+    assert adapter.get_metric("service_5xx_rate", "checkout").value == 0.02
+    assert attempts == 2
+
+
+def test_prometheus_adapter_formats_server_owned_2xx_template() -> None:
+    seen_query = ""
+
+    def responder(request: httpx.Request) -> httpx.Response:
+        nonlocal seen_query
+        seen_query = request.url.params["query"]
+        return httpx.Response(200, json={"data": {"result": [{"value": [0, "18.2"]}]}})
+
+    adapter = PrometheusAdapter(
+        "http://prometheus.example", client=httpx.Client(transport=httpx.MockTransport(responder))
+    )
+
+    result = adapter.get_metric("service_2xx_rate", "checkout")
+
+    assert result.value == 18.2
+    assert seen_query == (
+        'sum(rate(http_requests_total{service="checkout",method="GET",'
+        'route="/checkout",status=~"2.."}[1m]))'
+    )
+
+
+def test_prometheus_adapter_chart_template_emits_zero_when_5xx_series_is_absent() -> None:
+    seen_query = ""
+
+    def responder(request: httpx.Request) -> httpx.Response:
+        nonlocal seen_query
+        seen_query = request.url.params["query"]
+        return httpx.Response(200, json={"data": {"result": []}})
+
+    adapter = PrometheusAdapter(
+        "http://prometheus.example", client=httpx.Client(transport=httpx.MockTransport(responder))
+    )
+
+    assert adapter.get_metric_series("service_5xx_chart_rate", "checkout") == []
+    assert seen_query == (
+        '(sum(rate(http_requests_total{service="checkout",method="GET",'
+        'route="/checkout",status=~"5.."}[15s])) or vector(0))'
+    )
+
+
 def test_prometheus_adapter_returns_bounded_metric_series() -> None:
     def responder(request: httpx.Request) -> httpx.Response:
         assert request.url.path == "/api/v1/query_range"
@@ -78,6 +136,29 @@ def test_prometheus_adapter_returns_bounded_metric_series() -> None:
 
 
 def test_dashboard_projection_exposes_only_declared_controlled_traffic_scope() -> None:
+    class DashboardPrometheus:
+        def get_metric(self, query_name: str, service: str) -> MetricQueryResult:
+            values = {
+                "service_5xx_rate": 0.0,
+                "service_2xx_rate": 18.2,
+                "service_request_rate": 18.2,
+                "service_5xx_recovery_rate": 0.0,
+                "service_2xx_recovery_rate": 18.2,
+            }
+            return MetricQueryResult(
+                query_name=query_name,
+                value=values[query_name],
+                observed_at=datetime.now(UTC),
+                source_ref=f"fake:{service}:{query_name}",
+            )
+
+        def get_metric_series(self, query_name: str, _service: str):
+            values = [0.0, 0.0] if query_name == "service_5xx_chart_rate" else [18.1, 18.2]
+            return [
+                (datetime(2026, 7, 15, 12, index, tzinfo=UTC), value)
+                for index, value in enumerate(values)
+            ]
+
     store = FakeActionStore()
     store.incident_state = LifecycleState.TRIAGING
     store.evidence = [
@@ -98,9 +179,9 @@ def test_dashboard_projection_exposes_only_declared_controlled_traffic_scope() -
             content_hash="hash",
         )
     ]
-    snapshot = DashboardService(store, Settings(), kubernetes=FakeKubernetesAdapter()).snapshot(
-        "incident-1"
-    )
+    snapshot = DashboardService(
+        store, Settings(), kubernetes=FakeKubernetesAdapter(), prometheus=DashboardPrometheus()
+    ).snapshot("incident-1")
 
     assert snapshot.blast_radius.status == "declared_controlled_topology"
     assert snapshot.blast_radius.method == "GET"
@@ -109,6 +190,65 @@ def test_dashboard_projection_exposes_only_declared_controlled_traffic_scope() -
     assert snapshot.blast_radius.downstream_dependencies == []
     assert snapshot.slo_status == "not_configured"
     assert snapshot.service == "checkout"
+    assert snapshot.telemetry.success_rate == 18.2
+    assert [point.value for point in snapshot.telemetry.success_rate_trend] == [18.1, 18.2]
+
+
+def test_dashboard_retries_a_transient_failure_before_marking_telemetry_unavailable() -> None:
+    class FlakyDashboardPrometheus:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def get_metric(self, query_name: str, service: str) -> MetricQueryResult:
+            self.calls += 1
+            if self.calls == 1:
+                raise httpx.ConnectError("local port-forward reset")
+            values = {
+                "service_5xx_rate": 0.0,
+                "service_2xx_rate": 18.2,
+                "service_request_rate": 18.2,
+                "service_5xx_recovery_rate": 0.0,
+                "service_2xx_recovery_rate": 18.2,
+            }
+            return MetricQueryResult(
+                query_name=query_name,
+                value=values[query_name],
+                observed_at=datetime.now(UTC),
+                source_ref=f"fake:{service}:{query_name}",
+            )
+
+        def get_metric_series(self, query_name: str, _service: str):
+            value = 0.0 if query_name == "service_5xx_chart_rate" else 18.2
+            return [(datetime(2026, 7, 15, 12, 0, tzinfo=UTC), value)]
+
+    store = FakeActionStore()
+    store.incident_state = LifecycleState.TRIAGING
+    store.evidence = [
+        EvidenceRecord(
+            id="evidence-alert-1",
+            incident_id="incident-1",
+            source_type=EvidenceSourceType.ALERT,
+            source_ref="alert://checkout",
+            observed_at=datetime(2026, 7, 15, tzinfo=UTC),
+            summary="Checkout alert fired",
+            structured_payload={
+                "commonLabels": {"service": "checkout", "severity": "critical"}
+            },
+            content_hash="hash",
+        )
+    ]
+    prometheus = FlakyDashboardPrometheus()
+
+    snapshot = DashboardService(
+        store, Settings(), kubernetes=FakeKubernetesAdapter(), prometheus=prometheus
+    ).snapshot("incident-1")
+
+    assert snapshot.telemetry.status == "live"
+    assert snapshot.telemetry.success_rate == 18.2
+    # A snapshot contains five current-value reads. Concurrent collection lets
+    # in-flight reads finish before the bounded whole-snapshot retry, so the
+    # first transient error is followed by one complete second collection.
+    assert prometheus.calls == 10
 
 
 def test_fake_kubernetes_adapter_returns_typed_status() -> None:
@@ -438,13 +578,14 @@ class FakeWorkloadReader:
 
 
 class FakeIndicatorReader:
-    def __init__(self, value: float) -> None:
+    def __init__(self, value: float, success_value: float = 18.0) -> None:
         self.value = value
+        self.success_value = success_value
 
     def get_metric(self, query_name: str, service: str) -> MetricQueryResult:
         return MetricQueryResult(
             query_name=query_name,
-            value=self.value,
+            value=self.success_value if query_name == "service_2xx_recovery_rate" else self.value,
             observed_at=datetime.now(UTC),
             source_ref=f"fake:{service}:{query_name}",
         )
@@ -453,6 +594,11 @@ class FakeIndicatorReader:
 class UnavailableIndicatorReader:
     def get_metric(self, _query_name: str, _service: str) -> MetricQueryResult:
         raise RuntimeError("controlled indicator outage")
+
+
+class TransientPrometheusIndicatorReader:
+    def get_metric(self, _query_name: str, _service: str) -> MetricQueryResult:
+        raise httpx.ConnectError("controlled local port-forward reset")
 
 
 def test_kubernetes_preview_shows_exact_change_and_rejects_noop() -> None:
@@ -499,6 +645,10 @@ def test_remediation_requires_evidence_approval_and_unchanged_target() -> None:
     with pytest.raises(ValueError, match="target changed"):
         coordinator.execute(plan.id)
     assert adapter.executed is False
+    stale = store.action_plan(plan.id)
+    assert stale.status is ActionPlanStatus.STALE
+    assert stale.invalidation_reason == "action proposal is stale because the target changed"
+    assert store.incident_state is LifecycleState.TRIAGING
 
 
 def test_remediation_rejects_unknown_evidence() -> None:
@@ -568,6 +718,12 @@ def test_remediation_executes_only_after_approval_and_verifies_recovery() -> Non
         "window": "15 seconds",
         "maximum": 0.01,
     }
+    assert verification_plan["checks"][2] == {
+        "kind": "metric_threshold",
+        "query": "service_2xx_recovery_rate",
+        "window": "15 seconds",
+        "minimum": 0.01,
+    }
 
     coordinator.approve(previewed.id, "oncall@example.test")
     executed = coordinator.execute(previewed.id)
@@ -585,6 +741,25 @@ def test_remediation_executes_only_after_approval_and_verifies_recovery() -> Non
     assert store.incident_state is LifecycleState.RESOLVED
 
 
+def test_recovery_waits_for_rollout_readiness_without_reopening_triage() -> None:
+    store = FakeActionStore()
+    coordinator = RemediationCoordinator(store, FakeRemediationAdapter())
+    plan = coordinator.propose("incident-1", ActionType.RESTORE_RESPONSE_MODE, ["evidence-1"])
+    coordinator.approve(plan.id, "oncall@example.test")
+    coordinator.execute(plan.id)
+
+    pending, result = coordinator.verify(
+        plan.id,
+        RecoveryVerifier(FakeWorkloadReader(ready_replicas=0, desired_replicas=1)),
+    )
+
+    assert result.recovered is False
+    assert result.pending is True
+    assert "waiting for the controlled rollout" in result.reason
+    assert pending.status is ActionPlanStatus.EXECUTED
+    assert store.incident_state is LifecycleState.MONITORING
+
+
 def test_failed_recovery_reopens_triage_without_resolving_incident() -> None:
     store = FakeActionStore()
     coordinator = RemediationCoordinator(store, FakeRemediationAdapter())
@@ -592,13 +767,54 @@ def test_failed_recovery_reopens_triage_without_resolving_incident() -> None:
     coordinator.approve(plan.id, "oncall@example.test")
     coordinator.execute(plan.id)
 
+    observed_at = datetime(2026, 7, 14, tzinfo=UTC)
+    pending, first = coordinator.verify(
+        plan.id,
+        RecoveryVerifier(FakeWorkloadReader(), FakeIndicatorReader(value=0.5)),
+        now=observed_at,
+    )
+    assert first.pending is True
+    assert pending.status is ActionPlanStatus.EXECUTED
+    assert store.incident_state is LifecycleState.MONITORING
+
     completed, result = coordinator.verify(
         plan.id,
         RecoveryVerifier(FakeWorkloadReader(), FakeIndicatorReader(value=0.5)),
+        now=observed_at.replace(second=15),
     )
     assert result.recovered is False
+    assert result.pending is False
     assert completed.status is ActionPlanStatus.FAILED
     assert store.incident_state is LifecycleState.TRIAGING
+
+
+def test_response_mode_recovery_requires_observed_2xx_traffic() -> None:
+    store = FakeActionStore()
+    coordinator = RemediationCoordinator(store, FakeRemediationAdapter())
+    plan = coordinator.propose("incident-1", ActionType.RESTORE_RESPONSE_MODE, ["evidence-1"])
+    coordinator.approve(plan.id, "oncall@example.test")
+    coordinator.execute(plan.id)
+
+    observed_at = datetime(2026, 7, 14, tzinfo=UTC)
+    pending, first = coordinator.verify(
+        plan.id,
+        RecoveryVerifier(FakeWorkloadReader(), FakeIndicatorReader(value=0.0, success_value=0.0)),
+        now=observed_at,
+    )
+    assert first.pending is True
+    assert first.service_2xx_rate == 0.0
+    assert pending.status is ActionPlanStatus.EXECUTED
+
+    monitoring, result = coordinator.verify(
+        plan.id,
+        RecoveryVerifier(FakeWorkloadReader(), FakeIndicatorReader(value=0.0, success_value=0.0)),
+        now=observed_at.replace(second=15),
+    )
+    assert result.recovered is False
+    assert result.pending is True
+    assert "no successful checkout traffic" in result.reason
+    assert monitoring.status is ActionPlanStatus.EXECUTED
+    assert store.incident_state is LifecycleState.MONITORING
 
 
 def test_memory_recovery_requires_a_stable_restart_count_over_time() -> None:
@@ -647,4 +863,23 @@ def test_verifier_outage_keeps_executed_action_retryable() -> None:
             RecoveryVerifier(FakeWorkloadReader(), UnavailableIndicatorReader()),
         )
     assert store.action_plan(plan.id).status is ActionPlanStatus.EXECUTED
+    assert store.incident_state is LifecycleState.MONITORING
+
+
+def test_transient_prometheus_disconnect_keeps_response_recovery_in_monitoring() -> None:
+    store = FakeActionStore()
+    coordinator = RemediationCoordinator(store, FakeRemediationAdapter())
+    plan = coordinator.propose("incident-1", ActionType.RESTORE_RESPONSE_MODE, ["evidence-1"])
+    coordinator.approve(plan.id, "oncall@example.test")
+    coordinator.execute(plan.id)
+
+    pending, result = coordinator.verify(
+        plan.id,
+        RecoveryVerifier(FakeWorkloadReader(), TransientPrometheusIndicatorReader()),
+    )
+
+    assert result.pending is True
+    assert result.recovered is False
+    assert "temporarily unavailable" in result.reason
+    assert pending.status is ActionPlanStatus.EXECUTED
     assert store.incident_state is LifecycleState.MONITORING

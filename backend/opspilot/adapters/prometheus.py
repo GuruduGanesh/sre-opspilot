@@ -1,4 +1,5 @@
 from datetime import UTC, datetime, timedelta
+from time import sleep
 
 import httpx
 
@@ -21,8 +22,20 @@ class PrometheusAdapter:
             'route="{route}",status=~"5.."}}[15s]))'
         ),
         "service_5xx_chart_rate": (
+            '(sum(rate(http_requests_total{{service="{service}",method="{method}",'
+            'route="{route}",status=~"5.."}}[15s])) or vector(0))'
+        ),
+        "service_2xx_rate": (
             'sum(rate(http_requests_total{{service="{service}",method="{method}",'
-            'route="{route}",status=~"5.."}}[15s]))'
+            'route="{route}",status=~"2.."}}[1m]))'
+        ),
+        "service_2xx_recovery_rate": (
+            'sum(rate(http_requests_total{{service="{service}",method="{method}",'
+            'route="{route}",status=~"2.."}}[15s]))'
+        ),
+        "service_2xx_chart_rate": (
+            '(sum(rate(http_requests_total{{service="{service}",method="{method}",'
+            'route="{route}",status=~"2.."}}[15s])) or vector(0))'
         ),
         "service_request_rate": (
             'sum(rate(http_requests_total{{service="{service}",method="{method}",'
@@ -32,7 +45,14 @@ class PrometheusAdapter:
 
     def __init__(self, base_url: str, client: httpx.Client | None = None) -> None:
         self._base_url = base_url.rstrip("/")
+        self._owns_client = client is None
         self._client = client or httpx.Client(timeout=5.0)
+
+    def close(self) -> None:
+        """Release a dashboard-owned HTTP client after a bounded collection pass."""
+
+        if self._owns_client:
+            self._client.close()
 
     def get_metric(self, query_name: str, service: str) -> MetricQueryResult:
         selector = self._selector_for(service)
@@ -44,8 +64,7 @@ class PrometheusAdapter:
             raise ValueError(f"unsupported metric query: {query_name}") from error
 
         query = template.format(service=service, **selector)
-        response = self._client.get(f"{self._base_url}/api/v1/query", params={"query": query})
-        response.raise_for_status()
+        response = self._request("/api/v1/query", {"query": query})
         payload = response.json()
         results = payload.get("data", {}).get("result", [])
         value = float(results[0]["value"][1]) if results else 0.0
@@ -79,16 +98,15 @@ class PrometheusAdapter:
             raise ValueError(f"unsupported metric query: {query_name}") from error
 
         now = datetime.now(UTC)
-        response = self._client.get(
-            f"{self._base_url}/api/v1/query_range",
-            params={
+        response = self._request(
+            "/api/v1/query_range",
+            {
                 "query": template.format(service=service, **selector),
                 "start": (now - window).isoformat(),
                 "end": now.isoformat(),
                 "step": f"{step_seconds}s",
             },
         )
-        response.raise_for_status()
         results = response.json().get("data", {}).get("result", [])
         if not results:
             return []
@@ -96,6 +114,26 @@ class PrometheusAdapter:
             (datetime.fromtimestamp(float(timestamp), UTC), float(value))
             for timestamp, value in results[0].get("values", [])
         ]
+
+    def _request(self, path: str, params: dict[str, str]) -> httpx.Response:
+        """Retry once when the local kubectl port-forward drops a short-lived connection."""
+
+        last_error: httpx.HTTPError | None = None
+        for attempt in range(3):
+            try:
+                response = self._client.get(
+                    f"{self._base_url}{path}",
+                    params=params,
+                    headers={"Connection": "close"},
+                )
+                response.raise_for_status()
+                return response
+            except httpx.HTTPError as error:
+                last_error = error
+                if attempt < 2:
+                    sleep(0.2 * (attempt + 1))
+        assert last_error is not None
+        raise last_error
 
     @classmethod
     def _selector_for(cls, service: str) -> dict[str, str] | None:

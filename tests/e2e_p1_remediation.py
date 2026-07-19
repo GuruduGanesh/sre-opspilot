@@ -3,11 +3,13 @@
 import argparse
 import json
 import sys
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 
 from e2e_p1_kind import scenario_payload
 from fastapi.testclient import TestClient
+from opspilot.adapters.prometheus import PrometheusAdapter
 from opspilot.api.main import create_app
 from opspilot.settings import Settings
 
@@ -32,6 +34,18 @@ def main() -> int:
         OPS_PILOT_PROMETHEUS_URL=args.prometheus_url,
         OPS_PILOT_SIMULATION_INVESTIGATION_ENABLED=args.simulate_investigation,
     )
+    prometheus = PrometheusAdapter(args.prometheus_url)
+    try:
+        deadline = time.monotonic() + 90
+        while True:
+            pre_action_5xx = prometheus.get_metric("service_5xx_rate", "checkout").value
+            if pre_action_5xx >= 0.01:
+                break
+            if time.monotonic() >= deadline:
+                raise AssertionError("P1 5xx telemetry did not warm before remediation")
+            time.sleep(2)
+    finally:
+        prometheus.close()
     with TestClient(create_app(settings)) as http:
         created = http.post("/api/v1/ingress/alertmanager", json=scenario_payload(args.run_id))
         created.raise_for_status()
@@ -87,6 +101,7 @@ def main() -> int:
                     "action_id": plan["id"],
                     "lifecycle_after_execution": executed.json()["status"],
                     "investigation_mode": investigation_mode,
+                    "pre_action_5xx_rate": pre_action_5xx,
                     "verified_at": datetime.now(UTC).isoformat(),
                 },
                 sort_keys=True,

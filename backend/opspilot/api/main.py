@@ -1,5 +1,6 @@
 import asyncio
 import json
+import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import datetime
@@ -24,6 +25,8 @@ from opspilot.remediation import KubernetesRemediationAdapter, RemediationCoordi
 from opspilot.settings import Settings
 from opspilot.simulation import DemoScenarioService, DemoScenarioStart
 from opspilot.storage.incidents import SQLiteIncidentStore
+
+logger = logging.getLogger(__name__)
 
 _PUBLIC_LIFECYCLE_TARGETS = {
     LifecycleState.CLASSIFIED,
@@ -123,6 +126,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             namespace=runtime_settings.demo_namespace,
             workload="checkout",
             recovery_max_5xx_rate=runtime_settings.recovery_max_5xx_rate,
+            recovery_min_2xx_rate=runtime_settings.recovery_min_2xx_rate,
         )
 
     def action_or_404(action_id: str) -> ActionPlan:
@@ -500,6 +504,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             KubernetesAdapter(allowed_namespace=runtime_settings.demo_namespace),
             indicators,
             max_5xx_rate=runtime_settings.recovery_max_5xx_rate,
+            min_2xx_rate=runtime_settings.recovery_min_2xx_rate,
         )
         try:
             plan, recovery = remediation().verify(action_id, verifier)
@@ -511,6 +516,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         except ValueError as error:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
         except Exception as error:
+            logger.exception("controlled recovery verification is unavailable")
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail="recovery verification is unavailable in the local Kubernetes environment",

@@ -183,7 +183,7 @@ allowlist, and audit event.
 
 | Tool | Preconditions | Verification |
 | --- | --- | --- |
-| `restore_response_mode` | P1 evidence is attached and the checkout target has not changed | Restore the controlled response mode; readiness and the 15-second 5xx indicator meet the configured threshold |
+| `restore_response_mode` | P1 evidence is attached and the checkout target has not changed | Restore the controlled response mode; readiness, the 15-second 5xx indicator, and observed 2xx traffic meet the configured thresholds |
 | `restore_memory_mode` | P2 evidence is attached and the checkout target has not changed | Restore the controlled memory mode; readiness and restart count remain stable for 30 seconds |
 | `restart` | Target is allowlisted and current health evidence is attached | Replacement pod becomes ready and restart count remains stable for 30 seconds; not a demonstrated P2 cure |
 | `scale` | Target and replica bounds are allowlisted | Desired replicas become ready; not a demonstrated P2 cure |
@@ -314,8 +314,8 @@ flowchart LR
 - observable: elevated HTTP 5xx, a changed deployment revision, and relevant logs;
 - correct recovery: restore the controlled response mode through the allowlisted
   `restore_response_mode` action;
-- recovery: rollout healthy and the error-rate query returns below the configured
-  baseline for a sustained verification window.
+- recovery: rollout healthy, the error-rate query returns below the configured
+  baseline, and the 2xx query confirms traffic is flowing in the verification window.
 
 **P2: memory leak / OOMKill**
 

@@ -36,6 +36,10 @@ class ControlledScenarioAdapter:
             {
                 "metadata": {"resourceVersion": deployment.metadata.resource_version},
                 "spec": {
+                    "strategy": {
+                        "type": "RollingUpdate",
+                        "rollingUpdate": {"maxSurge": 0, "maxUnavailable": 1},
+                    },
                     "template": {
                         "spec": {
                             "containers": [

@@ -1,8 +1,10 @@
 """Evidence-backed dashboard projection for the controlled incident console."""
 
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from typing import Any
 
+import httpx
 from pydantic import BaseModel, ConfigDict, Field
 
 from opspilot.adapters.kubernetes import KubernetesAdapter
@@ -30,11 +32,14 @@ class TelemetrySnapshot(BaseModel):
     rate_window: str = "1m"
     recovery_window: str = "15s"
     error_rate: float | None = None
+    success_rate: float | None = None
     request_rate: float | None = None
     recovery_error_rate: float | None = None
+    recovery_success_rate: float | None = None
     error_ratio: float | None = Field(default=None, ge=0, le=1)
     recovery_state: str = "unknown"
     error_rate_trend: list[TelemetryPoint] = Field(default_factory=list)
+    success_rate_trend: list[TelemetryPoint] = Field(default_factory=list)
     status: str
     message: str | None = None
 
@@ -172,7 +177,8 @@ class DashboardService:
             slo_status="not_configured",
             slo_message=(
                 "No service-level objective is configured for this controlled demo. "
-                "The recovery gate is checkout 5xx rate at or below 0.01 over 15 seconds."
+                "The recovery gate requires checkout 5xx at or below 0.01/s and 2xx at or above "
+                "0.01/s over 15 seconds."
             ),
             collection_notes=notes,
             investigation_mode=(
@@ -184,8 +190,10 @@ class DashboardService:
 
     def _telemetry(self, service: str, notes: list[str]) -> TelemetrySnapshot:
         prometheus = self._prometheus
+        dashboard_owned_adapter = False
         if prometheus is None and self._settings.prometheus_url:
             prometheus = PrometheusAdapter(self._settings.prometheus_url)
+            dashboard_owned_adapter = True
         if prometheus is None:
             return TelemetrySnapshot(
                 service=service,
@@ -193,31 +201,13 @@ class DashboardService:
                 message="Set OPS_PILOT_PROMETHEUS_URL to show current controlled telemetry.",
             )
         try:
-            error_rate = prometheus.get_metric("service_5xx_rate", service)
-            request_rate = prometheus.get_metric("service_request_rate", service)
-            recovery_rate = prometheus.get_metric("service_5xx_recovery_rate", service)
-            trend = prometheus.get_metric_series("service_5xx_chart_rate", service)
-            return TelemetrySnapshot(
-                service=service,
-                error_rate=round(error_rate.value, 3),
-                request_rate=round(request_rate.value, 3),
-                recovery_error_rate=round(recovery_rate.value, 3),
-                error_ratio=(
-                    round(error_rate.value / request_rate.value, 4)
-                    if request_rate.value > 0
-                    else None
-                ),
-                recovery_state=(
-                    "passing"
-                    if recovery_rate.value <= self._settings.recovery_max_5xx_rate
-                    else "failing"
-                ),
-                error_rate_trend=[
-                    TelemetryPoint(observed_at=observed_at, value=round(value, 3))
-                    for observed_at, value in trend
-                ],
-                status="live",
-            )
+            for attempt in range(2):
+                try:
+                    return self._collect_telemetry(prometheus, service)
+                except httpx.TransportError:
+                    if attempt == 1:
+                        raise
+            raise RuntimeError("telemetry collection exhausted without a result")
         except Exception as error:
             notes.append(f"Prometheus telemetry is unavailable: {type(error).__name__}")
             return TelemetrySnapshot(
@@ -225,6 +215,73 @@ class DashboardService:
                 status="unavailable",
                 message="The controlled Prometheus endpoint did not return telemetry.",
             )
+        finally:
+            if dashboard_owned_adapter:
+                prometheus.close()
+
+    def _collect_telemetry(self, prometheus: PrometheusAdapter, service: str) -> TelemetrySnapshot:
+        """Collect the independent Prometheus reads concurrently.
+
+        A dashboard refresh needs five current values and two bounded chart series.
+        They are all server-owned queries against the same point in time, so waiting
+        for them one-by-one makes a transient local port-forward delay look like a
+        slow or blank console. Concurrent collection keeps the UI responsive while
+        still failing the whole snapshot honestly if the endpoint is unavailable.
+        """
+
+        with ThreadPoolExecutor(max_workers=7, thread_name_prefix="opspilot-telemetry") as pool:
+            error_rate_future = pool.submit(prometheus.get_metric, "service_5xx_rate", service)
+            success_rate_future = pool.submit(prometheus.get_metric, "service_2xx_rate", service)
+            request_rate_future = pool.submit(
+                prometheus.get_metric, "service_request_rate", service
+            )
+            recovery_rate_future = pool.submit(
+                prometheus.get_metric, "service_5xx_recovery_rate", service
+            )
+            recovery_success_rate_future = pool.submit(
+                prometheus.get_metric, "service_2xx_recovery_rate", service
+            )
+            failure_trend_future = pool.submit(
+                prometheus.get_metric_series, "service_5xx_chart_rate", service
+            )
+            success_trend_future = pool.submit(
+                prometheus.get_metric_series, "service_2xx_chart_rate", service
+            )
+            error_rate = error_rate_future.result()
+            success_rate = success_rate_future.result()
+            request_rate = request_rate_future.result()
+            recovery_rate = recovery_rate_future.result()
+            recovery_success_rate = recovery_success_rate_future.result()
+            failure_trend = failure_trend_future.result()
+            success_trend = success_trend_future.result()
+        return TelemetrySnapshot(
+            service=service,
+            error_rate=round(error_rate.value, 3),
+            success_rate=round(success_rate.value, 3),
+            request_rate=round(request_rate.value, 3),
+            recovery_error_rate=round(recovery_rate.value, 3),
+            recovery_success_rate=round(recovery_success_rate.value, 3),
+            error_ratio=(
+                round(error_rate.value / request_rate.value, 4) if request_rate.value > 0 else None
+            ),
+            recovery_state=(
+                "passing"
+                if (
+                    recovery_rate.value <= self._settings.recovery_max_5xx_rate
+                    and recovery_success_rate.value >= self._settings.recovery_min_2xx_rate
+                )
+                else "failing"
+            ),
+            error_rate_trend=[
+                TelemetryPoint(observed_at=observed_at, value=round(value, 3))
+                for observed_at, value in failure_trend
+            ],
+            success_rate_trend=[
+                TelemetryPoint(observed_at=observed_at, value=round(value, 3))
+                for observed_at, value in success_trend
+            ],
+            status="live",
+        )
 
     @staticmethod
     def _alert_context(records: list[EvidenceRecord]) -> tuple[str, str, str]:
@@ -322,8 +379,8 @@ class DashboardService:
                 "Wait for the approved controlled action to complete; do not assume recovery."
             ),
             LifecycleState.MONITORING: (
-                "Independent recovery verification is checking readiness and the 15-second "
-                "5xx gate."
+                "Independent recovery verification is checking workload readiness, the 15-second "
+                "5xx threshold, and observed 2xx traffic."
             ),
             LifecycleState.RESOLVED: (
                 "Recovery is verified. Draft the factual RCA from the persisted audit trail."

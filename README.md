@@ -21,8 +21,8 @@ The local demonstration includes:
 - a server-owned action plan with a Kubernetes dry-run preview, evidence binding,
   explicit approval, fingerprint and target-version staleness checks, and an
   append-only audit trail;
-- an independent recovery verifier that checks workload readiness and a bounded
-  checkout 5xx recovery indicator;
+- an independent recovery verifier that checks workload readiness, a bounded
+  checkout 5xx recovery indicator, and observed post-recovery 2xx traffic for P1;
 - an evidence-backed incident command center with current Prometheus rates,
   workload health, Kubernetes events, deployment history, evidence timeline,
   follow-up investigation input, approval controls, and an audit-derived
@@ -183,15 +183,16 @@ for the five-second dashboard refresh to show the live 5xx trend, then use the
 normal dry-run, approval, recovery, and RCA controls. **Reset** restores the two
 controlled scenario toggles; it does not approve or execute a remediation.
 
-For a clean local rehearsal before a screenshot or recording, stop the API and run:
+For a clean local rehearsal before a screenshot or recording, run:
 
 ```powershell
 .\scripts\prepare-demo.ps1 -ClearIncidentHistory
 ```
 
-This resets the controlled workload and deletes only the ignored local SQLite
-history at `artifacts/opspilot.db`; it does not touch a Kubernetes cluster outside
-the dedicated demo environment.
+This stops only the local OpsPilot API if it is running, resets the controlled
+workload, deletes only the ignored local SQLite history at `artifacts/opspilot.db`,
+then restarts the API in its previous mode. It does not touch a Kubernetes cluster
+outside the dedicated demo environment.
 
 ### Clean local UI rehearsal
 
@@ -201,8 +202,8 @@ incident; inject a scenario from the UI rather than reading telemetry for an
 unselected record.
 
 ```powershell
-# Stop an earlier API process first (Ctrl+C in its terminal), then reset the
-# dedicated demo workload and ignored local incident history.
+# Reset the dedicated demo workload and ignored local incident history. This
+# command stops and restarts only the local OpsPilot API when necessary.
 .\scripts\prepare-demo.ps1 -ClearIncidentHistory
 
 # Keep this terminal open. Reports are deterministic local evidence summaries

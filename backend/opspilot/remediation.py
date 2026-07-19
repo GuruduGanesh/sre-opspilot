@@ -213,6 +213,7 @@ class RemediationCoordinator:
         namespace: str = "opspilot-demo",
         workload: str = "checkout",
         recovery_max_5xx_rate: float = 0.01,
+        recovery_min_2xx_rate: float = 0.01,
     ) -> None:
         self._store = store
         self._adapter = adapter
@@ -220,6 +221,7 @@ class RemediationCoordinator:
         self._workload = workload
         self._policy = policy or ActionPolicy(namespace=namespace, workloads={workload})
         self._recovery_max_5xx_rate = recovery_max_5xx_rate
+        self._recovery_min_2xx_rate = recovery_min_2xx_rate
 
     def propose(
         self,
@@ -321,9 +323,14 @@ class RemediationCoordinator:
         current_version = self._adapter.resource_version(
             plan.proposal.namespace, plan.proposal.workload
         )
-        self._policy.validate_for_execution(
-            plan.proposal, plan.approved_at, current_version
-        )
+        try:
+            self._policy.validate_for_execution(
+                plan.proposal, plan.approved_at, current_version
+            )
+        except ValueError as error:
+            if plan.status is ActionPlanStatus.APPROVED and "stale" in str(error):
+                self._invalidate_approved_plan(plan, str(error))
+            raise
         if plan.status is not ActionPlanStatus.APPROVED:
             raise ValueError("only an approved action plan can execute")
         incident = self._store.incident(plan.proposal.incident_id)
@@ -362,6 +369,26 @@ class RemediationCoordinator:
             reason=f"awaiting independent recovery verification for action plan {plan.id}",
         )
         return executed
+
+    def _invalidate_approved_plan(self, plan: ActionPlan, reason: str) -> None:
+        """Audit a plan that was safe at preview time but changed before execution."""
+
+        stale = plan.model_copy(
+            update={
+                "status": ActionPlanStatus.STALE,
+                "invalidated_at": datetime.now(UTC),
+                "invalidation_reason": reason,
+            }
+        )
+        self._store.update_action_plan(stale, expected_status=ActionPlanStatus.APPROVED)
+        incident = self._store.incident(plan.proposal.incident_id)
+        if incident and incident["lifecycle_state"] == LifecycleState.ACTION_PROPOSED.value:
+            self._store.transition(
+                plan.proposal.incident_id,
+                LifecycleState.TRIAGING,
+                actor="opspilot-server",
+                reason=f"approved action plan {plan.id} invalidated before execution: {reason}",
+            )
 
     def verify(
         self, action_id: str, verifier: RecoveryVerifier, now: datetime | None = None
@@ -468,6 +495,14 @@ class RemediationCoordinator:
                     "query": "service_5xx_recovery_rate",
                     "window": "15 seconds",
                     "maximum": self._recovery_max_5xx_rate,
+                }
+            )
+            checks.append(
+                {
+                    "kind": "metric_threshold",
+                    "query": "service_2xx_recovery_rate",
+                    "window": "15 seconds",
+                    "minimum": self._recovery_min_2xx_rate,
                 }
             )
         if proposal.action_type in {ActionType.RESTORE_MEMORY_MODE, ActionType.RESTART}:

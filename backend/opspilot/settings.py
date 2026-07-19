@@ -15,6 +15,7 @@ class Settings(BaseSettings):
     alert_shared_secret: str | None = Field(default=None, alias="OPS_PILOT_ALERT_SHARED_SECRET")
     prometheus_url: str | None = Field(default=None, alias="OPS_PILOT_PROMETHEUS_URL")
     recovery_max_5xx_rate: float = Field(default=0.01, alias="OPS_PILOT_RECOVERY_MAX_5XX_RATE")
+    recovery_min_2xx_rate: float = Field(default=0.01, alias="OPS_PILOT_RECOVERY_MIN_2XX_RATE")
     demo_controls_enabled: bool = Field(default=True, alias="OPS_PILOT_DEMO_CONTROLS_ENABLED")
     simulation_investigation_enabled: bool = Field(
         default=False, alias="OPS_PILOT_SIMULATION_INVESTIGATION_ENABLED"

@@ -31,7 +31,10 @@ spec:
             - -c
             - |
               while true; do
-                wget -q -O /dev/null http://checkout:8000/checkout || true
+                # A checkout rollout can invalidate one in-flight Service
+                # connection. Bound each probe so the generator reconnects to
+                # the replacement pod instead of leaving demo telemetry idle.
+                wget -T 1 -q -O /dev/null http://checkout:8000/checkout || true
                 sleep 0.05
               done
           resources:

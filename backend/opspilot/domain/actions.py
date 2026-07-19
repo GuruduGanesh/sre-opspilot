@@ -23,6 +23,7 @@ class ActionPlanStatus(StrEnum):
     REJECTED = "Rejected"
     FAILED = "Failed"
     EXPIRED = "Expired"
+    STALE = "Stale"
 
 
 class ActionProposal(BaseModel):
@@ -68,6 +69,8 @@ class ActionPlan(BaseModel):
     rejected_at: datetime | None = None
     rejected_by: str | None = None
     rejection_reason: str | None = None
+    invalidated_at: datetime | None = None
+    invalidation_reason: str | None = None
     stability_observed_at: datetime | None = None
     stability_restart_count: int | None = Field(default=None, ge=0)
     # Persist the independent verifier result with the plan so a page reload
