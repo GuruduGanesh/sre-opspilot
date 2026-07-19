@@ -21,7 +21,7 @@ the final reviewer experience platform-independent.
 
 - Windows PowerShell 7+, Docker Desktop, `kind`, `kubectl`, Python 3.12, Node.js,
   and `uv`.
-- The `opspilot-checkout-0.1.tar` artifact attached to the review release.
+- The `opspilot-checkout-0.1.tar` artifact attached to release `v0.1.0`.
 
 ## Run the controlled review
 

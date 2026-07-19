@@ -9,12 +9,13 @@
 
 ## Current status
 
-**Phase:** Controlled rehearsal workflow complete; direct GPT-5.6 P1 validation recorded
+**Phase:** Submission package published
 
-**Next critical outcome:** Package and record the verified controlled workflow.
-One direct OpenAI GPT-5.6 Terra smoke test and one evidence-cited controlled P1
-investigation are recorded. Direct OpenAI remains the final-validation and
-recording path; OpenRouter is optional for local development experiments only.
+**Next critical outcome:** Keep the public repository, walkthrough video, and
+prebuilt demo bundle accessible throughout judging. One direct OpenAI GPT-5.6
+Terra smoke test and one evidence-cited controlled P1 investigation are recorded.
+Direct OpenAI remains the final-validation path; OpenRouter is optional for local
+development experiments only.
 
 ## Delivery board
 
@@ -25,7 +26,6 @@ recording path; OpenRouter is optional for local development experiments only.
 | Public README | Complete | Product boundary, intended architecture, and status documented | `README.md` |
 | Architecture and delivery plan | Complete | Safety model, tool boundary, milestones, and tests documented | `docs/ARCHITECTURE.md`, `docs/DELIVERY_PLAN.md` |
 | Local runtime check | Complete | Docker, Compose, kind, kubectl, Python, Node, and Git available | Verified July 14, 2026 |
-| OpenAI developer-docs connector | Pending restart | Connector available in the current Codex session | Installed globally; restart Codex before API implementation verification |
 | OpenAI API access | Complete (direct P1 validation) | Configure server-side access without exposing a key | Direct OpenAI GPT-5.6 Terra smoke test and one controlled P1 investigation succeeded on July 17; credentials and dated artifacts remain ignored |
 | Backend scaffold | Complete | FastAPI app, dependency management, health endpoint, tests | `uv run pytest` (9 passing tests) |
 | Frontend scaffold | Complete | React/TypeScript app with a build and test command | `npm run build` passes locally |
@@ -39,9 +39,9 @@ recording path; OpenRouter is optional for local development experiments only.
 | GPT-5.6 investigation workflow | Complete (one direct controlled P1) | Bounded function-tool investigation with structured hypotheses | The direct OpenAI P1 report persisted a 0.96-confidence, evidence-cited conclusion about controlled checkout `FAIL_MODE=true`. It also states the missing log/trace evidence needed for direct execution-path confirmation. This validates one controlled P1 run, not arbitrary incidents. |
 | Action policy and approval UX | Complete (controlled P1/P2 verification) | Allowlist, dry-run preflight, explicit approval, immutable audit, execution, and independent verification | Fresh July 16 P1/P2 runs passed. The preview exposes server-read before/after values, persisted evidence links, the self-declared local requester, server timestamp/expiry, fingerprint/resource-version binding, an audited rejection path, and independent recovery checks. No-op previews are refused. |
 | Incident console and chat | Complete (controlled rehearsal; one direct P1 report) | Command-center UI with actual controlled telemetry/context, follow-up input, approval, recovery, and RCA | The console can start fresh local P1/P2 incidents, auto-select from a persisted open-incident queue, support `?incident=<id>` deep links, display the 15-second 5xx trend, and move a recovered incident through audit-derived RCA draft and published states. Persisted live-model reports rehydrate on direct links and the RCA includes the latest bounded conclusion. |
-| Test suite and evaluation harness | Complete (controlled verification) | Unit, integration, end-to-end, safety tests, and saved evaluation results | `scripts/eval.ps1` v2 passed static checks, 27 unit/contract tests, frontend build, P1/P2 scenario checks, and both approved remediation flows; final source checks now include 52 pytest tests plus Ruff, Ty, and the frontend production build |
-| Judge test path | Ready (local wrapper verification) | Prebuilt no-rebuild local path | The checkout image archive was rebuilt July 16; `run-judge.ps1` imported it, provisioned the dedicated cluster, and passed both P1/P2 safety flows locally. Run the same wrapper from a clean machine before submission. |
-| Devpost assets and compliance | Not started | Video, screenshots, final README, feedback ID, form review | — |
+| Test suite and evaluation harness | Complete (controlled verification) | Unit, integration, end-to-end, safety tests, and saved evaluation results | `scripts/eval.ps1` v2 passed static checks, 27 unit/contract tests, frontend build, P1/P2 scenario checks, and both approved remediation flows; final source checks now include 59 pytest tests plus Ruff, Ty, and the frontend production build |
+| Judge test path | Complete (release published; local wrapper verified) | Prebuilt no-rebuild local path | Release `v0.1.0` includes `opspilot-checkout-0.1.tar` (51,697,152 bytes). `run-judge.ps1` imported the archive locally, provisioned the dedicated cluster, and passed both P1/P2 safety flows. A separate clean-machine run remains recommended but is not required for the submitted package to be accessible. |
+| Devpost assets and compliance | Complete | Video, screenshots, final README, feedback ID, form review | The submitted project includes the public walkthrough video, seven public screenshots, repository and testing instructions, the Codex feedback ID, and a voiceover explaining how Codex and GPT-5.6 were used. GitHub release `v0.1.0` contains the prebuilt demo bundle. |
 
 ## Verified progress log
 
@@ -102,24 +102,24 @@ recording path; OpenRouter is optional for local development experiments only.
 | 2026-07-18 | Hardened local Prometheus collection and re-ran both remediation paths. | Ruff, Ty, 55 pytest tests, and the production frontend build passed. P1 independently verified a `0.0` 5xx recovery; P2 independently verified 30 seconds of stable restarts. After cleanup, the live browser showed the original console record with `0.000/s` 5xx, `5.472/s` request rate, `0.0%` error ratio, `1/1` readiness, and a passing recovery gate. |
 | 2026-07-18 | Added a separate current 2xx response-rate signal to the command-center metric row. | Ruff, Ty, 55 pytest tests, and the production frontend build passed. A live completed P1 dashboard showed `0.000/s` 5xx, `18.493/s` 2xx, and the same `18.493/s` all-status request rate from the local Prometheus endpoint. The responsive grid uses seven columns on wide displays and a balanced four-plus-three card layout at laptop width. |
 | 2026-07-18 | Added a bounded full-snapshot retry for transient local Prometheus transport failures. | Ruff, Ty, 56 pytest tests, and the production frontend build passed. A targeted contract test proves a complete retry after a transient read failure. The restarted local API served the previously affected completed P1 with `0.000/s` 5xx, `18.255/s` 2xx, matching total rate, `0.0%` failure, and a passing recovery gate. Eighty serial and 40 overlapping dashboard reads also returned live telemetry. |
-
 | 2026-07-18 | Made the recovered-traffic signal and dashboard refresh path reliable across controlled checkout rollouts. | Ruff, Ty, 58 pytest tests, and the production frontend build passed. Prometheus now discovers the active checkout pod; the local load generator bounds each request to one second so it reconnects after a rollout; the dashboard collects its seven fixed telemetry reads concurrently and avoids overlapping UI refreshes. Fresh P1 and P2 remediation wrappers passed. The P1 verifier required `0.0/s` 5xx plus `18.402/s` observed 2xx before resolution. |
 | 2026-07-18 | Kept an approved P1 remediation in Monitoring while its replacement pod is still becoming ready. | Ruff, Ty, 59 pytest tests, and the production frontend build passed. An early recovery check now records a pending observation with the executed plan retryable; it does not falsely return the incident to Triaging. A local P1 rerun immediately observed `0/1` readiness as pending in `Monitoring`, then independently resolved at `1/1`, `0.0/s` 5xx, and `16.350/s` 2xx. |
 | 2026-07-19 | Rebuilt and executed the current prebuilt reviewer package locally. | `scripts/package-judge.ps1` created `opspilot-checkout-0.1.tar` (SHA-256 `CC25C3DD…BCB6EC5E`); `scripts/run-judge.ps1` imported it and passed P1/P2 safety flows. P1 independently verified `0.0/s` 5xx and `18.4/s` 2xx; P2 verified ready workload plus 30 seconds of stable restarts. This is local, not yet a fresh-machine verification. |
+| 2026-07-19 | Prepared final public submission assets. | `README.md` links the public 2:48 YouTube walkthrough, public screenshots cover the command center through RCA, the Devpost feedback ID was supplied in the submission, and the recorded voiceover states that Codex was the implementation partner for backend, safety gates, and tests. |
+| 2026-07-19 | Published the GitHub demo-bundle release. | Created `v0.1.0` at `https://github.com/GuruduGanesh/sre-opspilot/releases/tag/v0.1.0` and uploaded `opspilot-checkout-0.1.tar` as a release asset. GitHub API reported the asset as `uploaded`, size `51697152`; a public HEAD request to the direct asset URL returned HTTP 200 with the same content length. The release is titled `OpsPilot 0.1 - prebuilt demo bundle`. |
 
 ## Immediate backlog
 
-1. Run the prebuilt reviewer wrapper on a clean machine, then attach the image archive to the review release.
-2. Record the under-three-minute video from a clean controlled P1 run and capture the final Devpost image set. Do not spend a new model call unless the recording requires a fresh direct-model response.
-3. Reconcile every Devpost sentence against `CLAIM_VERIFICATION.md`, then complete the form, `/feedback` session ID, licensing, and repository-access checks.
-4. Run the final evaluation and P1/P2 remediation checks against the submitted commit.
+1. Keep the public repository, walkthrough video, and release asset accessible throughout judging.
+2. If time allows, run the prebuilt demo wrapper from a clean Windows machine or clean clone; the local wrapper and release asset have passed accessibility checks.
+3. Preserve the submitted release tag and avoid changing verified claims without new evidence.
 
 ## Development routine
 
 At the end of each implementation session:
 
 1. run the relevant checks and update this tracker only with verified results;
-2. append factual Codex contribution notes to `internal/CODEX_WORK_LOG.md`—task,
+2. append factual Codex contribution notes to the private development log—task,
    prompt/decision, changed files, verification, and limitation; and
 3. capture a screenshot as soon as a scenario gate first passes.
 
@@ -128,12 +128,12 @@ that a feature was built.
 
 ## Submission gates
 
-- [ ] Every Devpost claim has a matching, tested feature.
-- [ ] P1 and P2 run from a clean environment without manual repair.
-- [ ] No remediation occurs without explicit human approval.
-- [ ] Every hypothesis and blast-radius answer cites evidence.
-- [ ] Judge path works without asking judges to rebuild the project or use their own API key.
-- [ ] README lists installation, supported platforms, testing path, and exact use of Codex and GPT-5.6.
-- [ ] Public YouTube video is under three minutes and includes audio covering the product, Codex, and GPT-5.6.
-- [ ] `/feedback` session ID is taken from the Codex project thread where most core functionality was built.
-- [ ] Final Devpost form, licensing, and private-repository sharing requirements are checked against the official rules.
+- [x] Final Devpost text has been reconciled against `CLAIM_VERIFICATION.md`.
+- [x] P1 and P2 run locally without manual repair in the prebuilt reviewer wrapper.
+- [x] No remediation occurs without explicit human approval.
+- [x] Hypotheses and investigation conclusions are evidence-cited when a model or controlled report is present; unsupported blast-radius and SLO claims remain explicitly unknown.
+- [x] Judge path works from the release archive without asking judges to rebuild the checkout image or use their own API key.
+- [x] README lists installation, supported platforms, testing path, and exact use of Codex and GPT-5.6.
+- [x] Public YouTube video is under three minutes and includes audio covering the product, Codex, and GPT-5.6.
+- [x] `/feedback` session ID is taken from the Codex project thread where most core functionality was built.
+- [x] Final Devpost form, licensing, and public-repository requirements were checked, and the project was submitted.

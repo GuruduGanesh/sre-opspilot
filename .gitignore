@@ -40,6 +40,7 @@ Thumbs.db
 
 # Local scenario and evaluation output
 artifacts/
+tmp/
 
 # Local demo recordings
 *.mp4

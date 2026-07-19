@@ -30,8 +30,8 @@ Open `http://127.0.0.1:5173`. The local cluster must be running before using
 the simulation controls. The console shows an explicit telemetry-unavailable
 state when Prometheus is not connected; it never draws synthetic data.
 
-For the four captured states of the controlled P1 walkthrough, see the
-[recorded walkthrough in the README](../README.md#recorded-controlled-p1-walkthrough).
+For the captured controlled walkthrough states, see the
+[recorded walkthrough in the README](../README.md#recorded-controlled-walkthrough).
 
 Confirm the API was restarted in the intended mode:
 

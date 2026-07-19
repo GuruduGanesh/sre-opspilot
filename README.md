@@ -32,15 +32,15 @@ The local demonstration includes:
   explicitly rather than inferred;
 - a five-second refresh of the controlled dashboard and a bounded evidence
   collection step before every investigation request; unchanged event and
-  deployment records are deduplicated while fresh telemetry is retained; and
+  deployment records are deduplicated while fresh telemetry is retained;
 - a real local kind environment with a checkout service, Prometheus, and a load
-  generator; and
+  generator;
 - P1: a controlled checkout rollout that changes live traffic from HTTP 200 to
-  HTTP 500, produces Prometheus 5xx telemetry, and recovers after reset; and
+  HTTP 500, produces Prometheus 5xx telemetry, and recovers after reset;
 - local rehearsal controls that create or reopen the matching P1/P2 incident
   from the console. They modify only the dedicated demo checkout workload and
   retain the same preview, approval, audit, recovery, and RCA gates as the
-  command-line path.
+  command-line path; and
 - an auto-refreshing local on-call queue backed by persisted incident records.
   The console starts with an explicit selection screen; a reviewer can choose a
   retained local incident, inject P1/P2, or open `?incident=<id>` as a reproducible
@@ -136,7 +136,7 @@ current submitted-build claims.
 - `kind` and `kubectl`
 - Python 3.12+ and Node.js 20+
 - For the final live validation and demo recording: an OpenAI API key with
-  billing/model access and `api.responses.write`
+  billing and access to the configured GPT-5.6 model
 
 Copy `.env.example` to `.env` and add local configuration there. Credentials are
 never committed to the repository.
@@ -245,9 +245,9 @@ For a complete controlled on-call walkthrough—from starting P1/P2 through
 evidence review, approved remediation, independent verification, and RCA—see
 [the on-call rehearsal guide](docs/USER_GUIDE.md).
 
-### Recorded controlled P1 walkthrough
+### Recorded controlled walkthrough
 
-These screenshots were captured from controlled local runs. The Kubernetes
+These screenshots were captured from controlled local P1 and P2 runs. The Kubernetes
 workload, Prometheus telemetry, alert payload, approval history, and recovery
 result are all from the demo environment. Each screenshot is one decision point,
 not a long browser capture.
@@ -285,9 +285,9 @@ not a long browser capture.
    | Recovery gate: failing | 5xx must fall to `0.010/s` or below for 15 seconds. |
    | Investigation: not run | The prompt is ready; no hypothesis is fabricated before a model report exists. |
 
-3. Review the server-side Kubernetes dry-run. The exact proposed setting change,
-   target, evidence binding, expiry, self-declared local approver, and rejection
-   path are visible before anything is applied.
+3. Review the P2 server-side Kubernetes dry-run. The exact proposed setting
+   change, target, evidence binding, expiry, self-declared local approver, and
+   rejection path are visible before anything is applied.
 
 ![Explicit human approval for an exact controlled action plan](docs/assets/screenshots/03-dry-run-approval.png)
 
